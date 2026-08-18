@@ -21,6 +21,7 @@ export interface AnalysisResponse {
 }
 
 export interface StockItem extends InvoiceLine {
+  ancien_prix_unitaire?: number;
   id: string; // Unique ID (e.g. hash of product name + bio status)
   date_ajout: string; // ISO date
   dernier_mouvement: string; // ISO date

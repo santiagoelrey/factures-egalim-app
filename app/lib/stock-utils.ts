@@ -32,6 +32,7 @@ export const addLinesToStock = (lines: InvoiceLine[]): number => {
         const existingIdx = stockItems.findIndex((item) => item.id === id);
 
         if (existingIdx >= 0) {
+            stockItems[existingIdx].ancien_prix_unitaire = stockItems[existingIdx].prix_unitaire;
             stockItems[existingIdx].quantite += Number(line.quantite);
             stockItems[existingIdx].total_ht += Number(line.total_ht);
             stockItems[existingIdx].prix_unitaire = Number(line.prix_unitaire);
