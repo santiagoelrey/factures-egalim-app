@@ -73,7 +73,7 @@ export async function POST(req: Request) {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-4o',  // gpt-4o has best vision quality; gpt-4o-mini is cheaper
+        model: 'gpt-4o-mini',  // gpt-4o has best vision quality; gpt-4o-mini is cheaper
         messages: [
           {
             role: 'user',
@@ -113,7 +113,7 @@ export async function POST(req: Request) {
     const parsed = JSON.parse(rawText);
     const data = parsed.data || parsed; // Handle both direct array or wrapped object
 
-    return Response.json({ data, model_used: 'gpt-4o' });
+    return Response.json({ data, model_used: 'gpt-4o-mini' });
 
   } catch (error: any) {
     console.error('Analysis error:', error);
