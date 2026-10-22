@@ -1442,7 +1442,16 @@ export default function AdvancedMenuPlanner() {
                   onClick={() => {
                     setActiveDay(day);
                     setAddingCustomIngredientTo(null);
-                    setConvives(weeklyPlan[day].convives || 100);
+                    const dayDate = getDayDate(day);
+                    const hc = getHeadcountForDate(dayDate);
+                    if (hc && hc.total > 0 && (!weeklyPlan[day]?.convives || weeklyPlan[day]?.convives === 100)) {
+                      const newPlan = { ...weeklyPlan };
+                      newPlan[day].convives = hc.total;
+                      savePlan(newPlan);
+                      setConvives(hc.total);
+                    } else {
+                      setConvives(weeklyPlan[day]?.convives || (hc ? hc.total : 100));
+                    }
                   }}
                   className={`flex-1 min-w-[110px] py-3 px-3 rounded-xl font-bold text-xs transition-all flex flex-col items-center gap-1 ${
                     activeDay === day
