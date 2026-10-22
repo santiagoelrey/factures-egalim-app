@@ -4,10 +4,15 @@ import { useState, useEffect } from 'react';
 import { 
   Package, Search, Plus, Minus, Trash2, Save, UtensilsCrossed, 
   CheckCircle2, Calendar, ArrowRight, Download, RefreshCw, BookOpen, 
-  Users, ChevronDown, Copy, Edit3, PlusCircle
+  Users, ChevronDown, Copy, Edit3, PlusCircle, Sparkles, Check
 } from 'lucide-react';
 import { StockItem } from '../lib/types';
 import { getStock, deductFromStock } from '../lib/stock-utils';
+import EffectifsManager from './EffectifsManager';
+import { 
+  DailyHeadcount, getHeadcounts, getHeadcountForDate, 
+  formatDateDisplay, formatDateLongFR, normalizeDate 
+} from '../lib/effectifs-utils';
 
 // Interfaces for Technical Sheets
 interface RecipeIngredient {
@@ -48,6 +53,7 @@ interface DailyMenu {
   dessert: CourseSelection;
   valide: boolean;
   convives?: number;
+  date?: string; // Format ISO YYYY-MM-DD
 }
 
 interface WeeklyPlan {
@@ -131,7 +137,7 @@ const DEFAULT_FICHES: FicheTechnique[] = [
 ];
 
 export default function AdvancedMenuPlanner() {
-  const [activeTab, setActiveTab] = useState<'PLANNER' | 'RECIPES' | 'TEMPLATES'>('PLANNER');
+  const [activeTab, setActiveTab] = useState<'PLANNER' | 'RECIPES' | 'TEMPLATES' | 'EFFECTIFS'>('PLANNER');
   const [weeklyPlan, setWeeklyPlan] = useState<WeeklyPlan>({
     Lundi: emptyDailyMenu(),
     Mardi: emptyDailyMenu(),
@@ -143,6 +149,9 @@ export default function AdvancedMenuPlanner() {
   const [convives, setConvives] = useState(100);
   const [stock, setStock] = useState<StockItem[]>([]);
   
+  // Base de données d'effectifs datés
+  const [headcounts, setHeadcounts] = useState<DailyHeadcount[]>([]);
+
   // Fiches Techniques Library State
   const [fiches, setFiches] = useState<FicheTechnique[]>([]);
   const [editingFiche, setEditingFiche] = useState<FicheTechnique | null>(null);
@@ -156,6 +165,96 @@ export default function AdvancedMenuPlanner() {
   // Search/Add custom ingredients state
   const [addingCustomIngredientTo, setAddingCustomIngredientTo] = useState<'entree' | 'plat' | 'accompagnement' | 'dessert' | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Déduire la date calendaire d'un jour donné (Lundi -> Vendredi)
+  const inferDayDate = (dayName: string): string => {
+    const activeWeek = savedWeeks.find(w => w.id === activeWeekId);
+    if (activeWeek) {
+      const match = activeWeek.nom.match(/Semaine du (\d{1,2}) ([^ ]+) au (\d{1,2}) ([^ ]+) (\d{4})/i);
+      if (match) {
+        const months: { [key: string]: number } = {
+          'janvier': 0, 'février': 1, 'mars': 2, 'avril': 3, 'mai': 4, 'juin': 5,
+          'juillet': 6, 'août': 7, 'septembre': 8, 'octobre': 9, 'novembre': 10, 'décembre': 11
+        };
+        const year = parseInt(match[5]);
+        const startDay = parseInt(match[1]);
+        const startMonth = months[match[2].toLowerCase()] ?? 0;
+        const monDate = new Date(year, startMonth, startDay);
+        const dayOffset = DAYS.indexOf(dayName);
+        if (dayOffset !== -1) {
+          const d = new Date(monDate);
+          d.setDate(monDate.getDate() + dayOffset);
+          return d.toISOString().split('T')[0];
+        }
+      }
+    }
+
+    const today = new Date();
+    const currentDayOfWeek = today.getDay();
+    const distanceToMon = currentDayOfWeek === 0 ? -6 : 1 - currentDayOfWeek;
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + distanceToMon);
+    const dayOffset = DAYS.indexOf(dayName);
+    const target = new Date(monday);
+    target.setDate(monday.getDate() + (dayOffset !== -1 ? dayOffset : 0));
+    return target.toISOString().split('T')[0];
+  };
+
+  const getDayDate = (dayName: string): string => {
+    return weeklyPlan[dayName]?.date || inferDayDate(dayName);
+  };
+
+  const handleSetDayDate = (newDate: string) => {
+    const newPlan = { ...weeklyPlan };
+    if (!newPlan[activeDay]) return;
+    newPlan[activeDay].date = newDate;
+
+    // Vérifier si un effectif existe dans la base pour cette date
+    const hc = getHeadcountForDate(newDate);
+    if (hc && hc.total > 0) {
+      newPlan[activeDay].convives = hc.total;
+      setConvives(hc.total);
+    }
+
+    savePlan(newPlan);
+  };
+
+  const handleSyncDayWithHeadcount = () => {
+    const currentDate = getDayDate(activeDay);
+    const hc = getHeadcountForDate(currentDate);
+    if (hc && hc.total > 0) {
+      saveConvives(hc.total);
+      alert(`Effectif du ${formatDateDisplay(currentDate)} (${hc.total} repas) appliqué avec succès !`);
+    } else {
+      alert(`Aucun effectif trouvé dans la base pour le ${formatDateDisplay(currentDate)}. Rendez-vous dans l'onglet "Base d'Effectifs" pour l'importer ou le renseigner.`);
+    }
+  };
+
+  const handleSyncWeekWithHeadcounts = () => {
+    const newPlan = { ...weeklyPlan };
+    let syncedDays = 0;
+
+    DAYS.forEach(day => {
+      const dateVal = newPlan[day]?.date || inferDayDate(day);
+      newPlan[day].date = dateVal;
+      const hc = getHeadcountForDate(dateVal);
+      if (hc && hc.total > 0) {
+        newPlan[day].convives = hc.total;
+        syncedDays++;
+      }
+    });
+
+    savePlan(newPlan);
+    if (newPlan[activeDay]?.convives) {
+      setConvives(newPlan[activeDay].convives);
+    }
+
+    if (syncedDays > 0) {
+      alert(`Succès : ${syncedDays} jour(s) de la semaine synchronisé(s) avec la base d'effectifs !`);
+    } else {
+      alert("Aucun effectif correspondant aux dates de cette semaine n'a été trouvé dans la base.");
+    }
+  };
 
   // Load everything on mount
   useEffect(() => {
@@ -242,12 +341,16 @@ export default function AdvancedMenuPlanner() {
     if (storedTemplates) {
       setTemplates(JSON.parse(storedTemplates));
     }
+
+    // Load Headcounts database
+    setHeadcounts(getHeadcounts());
   }, []);
 
   // Sync everything in real-time when storage changes or window gains focus
   useEffect(() => {
     const handleSync = () => {
       setStock(getStock());
+      setHeadcounts(getHeadcounts());
       
       const storedWeeks = localStorage.getItem('egalim_saved_weeks_v1');
       if (storedWeeks) {
@@ -524,16 +627,18 @@ export default function AdvancedMenuPlanner() {
     savePlan(newPlan);
   };
 
-  // Add Custom Ingredient
+  // Add Custom Ingredient with support for direct numeric quantity
   const handleAddCustomIngredient = (
     courseKey: 'entree' | 'plat' | 'accompagnement' | 'dessert', 
     itemOrName: StockItem | string,
     customLabel?: string,
     customUnit?: 'kilo' | 'pièce',
-    customPrice?: number
+    customPrice?: number,
+    customQty?: number
   ) => {
     const newPlan = { ...weeklyPlan };
     const selection = newPlan[activeDay][courseKey];
+    const initialQty = customQty && customQty > 0 ? Number(customQty.toFixed(2)) : 1;
     
     if (typeof itemOrName === 'string') {
       const name = itemOrName.trim();
@@ -545,7 +650,7 @@ export default function AdvancedMenuPlanner() {
       selection.ingredientsCustom.push({
         id: `custom-${crypto.randomUUID()}`,
         produit: name,
-        quantite_utilisee: 1,
+        quantite_utilisee: initialQty,
         est_bio: customLabel === 'BIO',
         label: customLabel || 'STANDARD',
         unite: customUnit || 'kilo',
@@ -582,7 +687,7 @@ export default function AdvancedMenuPlanner() {
       selection.ingredientsCustom.push({
         id: itemOrName.id,
         produit: itemOrName.produit,
-        quantite_utilisee: 1,
+        quantite_utilisee: initialQty,
         est_bio: itemOrName.est_bio,
         label: itemOrName.label || (itemOrName.est_bio ? 'BIO' : 'STANDARD'),
         unite: 'kilo' // Default unit for items from stock is kilo
@@ -594,7 +699,7 @@ export default function AdvancedMenuPlanner() {
     setSearchTerm('');
   };
 
-  // Adjust Custom Ingredient Quantity
+  // Adjust Custom Ingredient Quantity with +/- delta
   const handleCustomQtyChange = (
     courseKey: 'entree' | 'plat' | 'accompagnement' | 'dessert', 
     id: string, 
@@ -604,7 +709,24 @@ export default function AdvancedMenuPlanner() {
     const selection = newPlan[activeDay][courseKey];
     selection.ingredientsCustom = selection.ingredientsCustom.map(ing => {
       if (ing.id === id) {
-        return { ...ing, quantite_utilisee: Math.max(0.1, Number((ing.quantite_utilisee + delta).toFixed(2))) };
+        return { ...ing, quantite_utilisee: Math.max(0.01, Number((ing.quantite_utilisee + delta).toFixed(2))) };
+      }
+      return ing;
+    });
+    savePlan(newPlan);
+  };
+
+  // Saisie directe en chiffre de la quantité pour un ingrédient
+  const handleCustomQtyDirectInput = (
+    courseKey: 'entree' | 'plat' | 'accompagnement' | 'dessert',
+    id: string,
+    value: number
+  ) => {
+    const newPlan = { ...weeklyPlan };
+    const selection = newPlan[activeDay][courseKey];
+    selection.ingredientsCustom = selection.ingredientsCustom.map(ing => {
+      if (ing.id === id) {
+        return { ...ing, quantite_utilisee: Math.max(0.01, Number(value.toFixed(2))) };
       }
       return ing;
     });
@@ -826,7 +948,8 @@ export default function AdvancedMenuPlanner() {
     customBio?: boolean, 
     customLabel?: string, 
     customUnit?: 'kilo' | 'pièce',
-    customPrice?: number
+    customPrice?: number,
+    customQty?: number
   ) => {
     if (!editingFiche) return;
     if (editingFiche.ingredients.some(i => i.produit === productName)) return;
@@ -835,10 +958,11 @@ export default function AdvancedMenuPlanner() {
     const isBio = customBio !== undefined ? customBio : (stockItem ? stockItem.est_bio : false);
     const label = customLabel !== undefined ? customLabel : (stockItem ? stockItem.label : (isBio ? 'BIO' : 'STANDARD'));
     const unit = customUnit || 'kilo';
+    const initialQty = customQty && customQty > 0 ? Number(customQty.toFixed(2)) : 1;
     
     editingFiche.ingredients.push({
       produit: productName,
-      quantiteBase: 1,
+      quantiteBase: initialQty,
       est_bio: isBio,
       label: label,
       unite: unit,
@@ -986,6 +1110,22 @@ export default function AdvancedMenuPlanner() {
             <Copy className="w-4 h-4" />
             Modèles
           </button>
+          <button
+            onClick={() => setActiveTab('EFFECTIFS')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === 'EFFECTIFS' ? 'bg-orange-500 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            Base d'Effectifs
+            {headcounts.length > 0 && (
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                activeTab === 'EFFECTIFS' ? 'bg-white/25 text-white' : 'bg-orange-100 text-orange-700'
+              }`}>
+                {headcounts.length}
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
@@ -1054,47 +1194,129 @@ export default function AdvancedMenuPlanner() {
               </button>
             </div>
           </div>
-          {/* Guest Count Selector Bar */}
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col md:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-3 w-full md:w-auto">
-              <div className="p-3 bg-orange-50 rounded-xl text-orange-500">
-                <Users className="w-6 h-6" />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block">Nombre de Convives</label>
-                <div className="flex items-center gap-2 mt-1">
-                  <button 
-                    onClick={() => saveConvives(Math.max(1, convives - 10))}
-                    className="p-1 border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
-                  >
-                    <Minus className="w-4 h-4" />
-                  </button>
-                  <input
-                    type="number"
-                    className="w-20 text-center font-extrabold text-lg text-gray-800 focus:outline-none border-b border-dashed border-gray-300"
-                    value={convives}
-                    onChange={(e) => saveConvives(Math.max(1, parseInt(e.target.value) || 1))}
-                  />
-                  <button 
-                    onClick={() => saveConvives(convives + 10)}
-                    className="p-1 border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
-                  >
-                    <Plus className="w-4 h-4" />
-                  </button>
+          {/* Guest Count & Dated Headcount Bar */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-5">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-orange-50 rounded-xl text-orange-500">
+                  <Users className="w-6 h-6" />
                 </div>
+                <div>
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block">Repas Prévus ({activeDay})</label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <button 
+                      onClick={() => saveConvives(Math.max(1, convives - 10))}
+                      className="p-1 border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
+                    >
+                      <Minus className="w-4 h-4" />
+                    </button>
+                    <input
+                      type="number"
+                      className="w-20 text-center font-extrabold text-lg text-gray-800 focus:outline-none border-b border-dashed border-gray-300"
+                      value={convives}
+                      onChange={(e) => saveConvives(Math.max(1, parseInt(e.target.value) || 1))}
+                    />
+                    <button 
+                      onClick={() => saveConvives(convives + 10)}
+                      className="p-1 border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Date du jour actif et liaison effectifs */}
+              <div className="flex flex-wrap items-center gap-2.5 pt-2 sm:pt-0 border-t sm:border-t-0 sm:border-l border-gray-100 sm:pl-5">
+                <div>
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-1">Date calendaire</label>
+                  <input
+                    type="date"
+                    value={getDayDate(activeDay)}
+                    onChange={(e) => handleSetDayDate(e.target.value)}
+                    className="px-2.5 py-1 text-xs font-bold border border-gray-250 rounded-xl focus:outline-none focus:border-orange-500 bg-gray-50 text-gray-800"
+                  />
+                </div>
+
+                {(() => {
+                  const currentDate = getDayDate(activeDay);
+                  const hc = getHeadcountForDate(currentDate);
+                  if (hc) {
+                    const isMatched = (weeklyPlan[activeDay]?.convives || 100) === hc.total;
+                    return (
+                      <div className="flex items-center gap-1.5 self-end pb-0.5">
+                        <span className={`px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1 border ${
+                          isMatched ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-orange-50 text-orange-800 border-orange-200'
+                        }`}>
+                          <Check className="w-3.5 h-3.5" />
+                          Base : {hc.total} repas
+                        </span>
+                        {!isMatched && (
+                          <button
+                            onClick={handleSyncDayWithHeadcount}
+                            className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs cursor-pointer"
+                            title="Appliquer l'effectif de la base à ce jour"
+                          >
+                            Appliquer
+                          </button>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="self-end pb-1 text-[11px] text-gray-400 italic">
+                      (Pas d'effectif enregistré pour cette date)
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
-            <div className="flex gap-2 w-full md:w-auto justify-end">
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
+              <button
+                onClick={handleSyncWeekWithHeadcounts}
+                className="flex items-center gap-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 px-3.5 py-2.5 rounded-xl font-bold transition-all text-xs cursor-pointer shadow-xs"
+                title="Synchroniser tous les jours de la semaine avec la base d'effectifs"
+              >
+                <Sparkles className="w-4 h-4 text-orange-500" />
+                Sync toute la semaine ({headcounts.length} en base)
+              </button>
+
               <button
                 onClick={handleExportCSV}
-                className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-4 py-2.5 rounded-xl font-bold transition-all text-xs shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-4 py-2.5 rounded-xl font-bold transition-all text-xs shadow-sm cursor-pointer"
               >
                 <Download className="w-4 h-4" />
                 Fiche de Cuisine (CSV)
               </button>
             </div>
           </div>
+
+          {/* Weekly Production & Meal Count Bar */}
+          {(() => {
+            const totalWeekMeals = DAYS.reduce((sum, d) => sum + (weeklyPlan[d]?.convives || 100), 0);
+            const totalWeekCost = DAYS.reduce((sum, d) => {
+              const dm = weeklyPlan[d];
+              const dc = dm?.convives || 100;
+              return sum + (calculateCourseCost(dm.entree, dc) + calculateCourseCost(dm.plat, dc) + calculateCourseCost(dm.accompagnement, dc) + calculateCourseCost(dm.dessert, dc));
+            }, 0);
+            const avgCostPerMeal = totalWeekMeals > 0 ? totalWeekCost / totalWeekMeals : 0;
+
+            return (
+              <div className="bg-slate-900 text-white p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-sm">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-orange-400" />
+                  <span className="font-bold">Production Totale de la Semaine :</span>
+                  <span className="px-2 py-0.5 bg-orange-500 text-white font-extrabold rounded-md text-xs">{totalWeekMeals} repas prévus</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-4 text-slate-300">
+                  <div>Budget achats semaine : <strong className="text-white">{totalWeekCost.toFixed(2)} € HT</strong></div>
+                  <div className="hidden sm:inline">|</div>
+                  <div>Coût moyen par repas produit : <strong className="text-orange-400">{avgCostPerMeal.toFixed(2)} € HT</strong></div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Day Cost Summary Card */}
           {(() => {
@@ -1110,14 +1332,14 @@ export default function AdvancedMenuPlanner() {
             return (
               <div className="bg-gradient-to-r from-orange-500 to-amber-500 p-6 rounded-2xl text-white shadow-md flex flex-col md:flex-row items-center justify-between gap-4">
                 <div className="space-y-1">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider opacity-90">Analyse Financière du Menu ({activeDay})</h3>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider opacity-90">Analyse Financière du Menu ({activeDay} {formatDateDisplay(getDayDate(activeDay))})</h3>
                   <div className="flex items-baseline gap-2">
                     <span className="text-3xl font-extrabold">{totalCost.toFixed(2)} €</span>
-                    <span className="text-sm opacity-90">total HT pour {dayConvives} convives</span>
+                    <span className="text-sm opacity-90">total HT pour {dayConvives} repas produits</span>
                   </div>
                 </div>
                 <div className="bg-white/10 backdrop-blur-md rounded-xl p-3 text-right">
-                  <span className="text-xs block opacity-85">Coût moyen par repas</span>
+                  <span className="text-xs block opacity-85">Coût moyen par repas produit</span>
                   <span className="text-2xl font-black">{perPerson.toFixed(2)} € <span className="text-xs font-normal">/ repas</span></span>
                 </div>
               </div>
@@ -1129,6 +1351,8 @@ export default function AdvancedMenuPlanner() {
             {DAYS.map(day => {
               const isValidated = weeklyPlan[day].valide;
               const { status } = getDayStockStatus(day);
+              const dayMeals = weeklyPlan[day].convives || 100;
+              const dayDateFormatted = formatDateDisplay(getDayDate(day));
               
               return (
                 <button
@@ -1138,14 +1362,19 @@ export default function AdvancedMenuPlanner() {
                     setAddingCustomIngredientTo(null);
                     setConvives(weeklyPlan[day].convives || 100);
                   }}
-                  className={`flex-1 min-w-[90px] py-3.5 px-4 rounded-xl font-bold text-sm transition-all flex flex-col items-center gap-1 ${
+                  className={`flex-1 min-w-[110px] py-3 px-3 rounded-xl font-bold text-xs transition-all flex flex-col items-center gap-1 ${
                     activeDay === day
                       ? 'bg-orange-500 text-white shadow-md shadow-orange-100'
                       : 'text-gray-600 hover:bg-gray-50'
                   }`}
                 >
-                  <span>{day}</span>
-                  <div className="flex gap-1">
+                  <div className="flex items-center gap-1 font-extrabold text-sm">
+                    <span>{day}</span>
+                  </div>
+                  <span className={`text-[10px] ${activeDay === day ? 'text-orange-100' : 'text-gray-400'}`}>
+                    {dayDateFormatted} • {dayMeals} repas
+                  </span>
+                  <div className="flex gap-1 mt-0.5">
                     {isValidated ? (
                       <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded-full font-extrabold">✓ Déduit</span>
                     ) : status === 'READY' ? (
@@ -1379,21 +1608,37 @@ export default function AdvancedMenuPlanner() {
                                   <option value="PECHE_DURABLE">Pêche Durable</option>
                                 </select>
 
-                                <button
-                                  disabled={weeklyPlan[activeDay].valide}
-                                  onClick={() => handleCustomQtyChange(courseKey, ing.id, -1)}
-                                  className="p-0.5 hover:bg-orange-100 rounded text-orange-600"
-                                >
-                                  <Minus className="w-3 h-3" />
-                                </button>
-                                <span className="font-bold text-gray-900">{ing.quantite_utilisee}</span>
-                                <button
-                                  disabled={weeklyPlan[activeDay].valide}
-                                  onClick={() => handleCustomQtyChange(courseKey, ing.id, 1)}
-                                  className="p-0.5 hover:bg-orange-100 rounded text-orange-600"
-                                >
-                                  <Plus className="w-3 h-3" />
-                                </button>
+                                <div className="flex items-center gap-1 bg-white border border-orange-200 rounded-lg px-1.5 py-0.5 shadow-2xs">
+                                  <button
+                                    disabled={weeklyPlan[activeDay].valide}
+                                    onClick={() => handleCustomQtyChange(courseKey, ing.id, -1)}
+                                    className="p-0.5 hover:bg-orange-100 rounded text-orange-600 disabled:opacity-30 cursor-pointer"
+                                    title="-1"
+                                  >
+                                    <Minus className="w-3 h-3" />
+                                  </button>
+                                  <input
+                                    disabled={weeklyPlan[activeDay].valide}
+                                    type="number"
+                                    step="0.1"
+                                    min="0.01"
+                                    value={ing.quantite_utilisee}
+                                    onChange={(e) => {
+                                      const val = parseFloat(e.target.value);
+                                      handleCustomQtyDirectInput(courseKey, ing.id, isNaN(val) ? 0 : val);
+                                    }}
+                                    className="w-14 text-center font-extrabold text-gray-900 text-xs focus:outline-none bg-transparent"
+                                    title="Saisir directement la quantité en chiffre"
+                                  />
+                                  <button
+                                    disabled={weeklyPlan[activeDay].valide}
+                                    onClick={() => handleCustomQtyChange(courseKey, ing.id, 1)}
+                                    className="p-0.5 hover:bg-orange-100 rounded text-orange-600 disabled:opacity-30 cursor-pointer"
+                                    title="+1"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                  </button>
+                                </div>
                                 <select
                                   disabled={weeklyPlan[activeDay].valide}
                                   value={ing.unite || 'kilo'}
@@ -1454,7 +1699,7 @@ export default function AdvancedMenuPlanner() {
 
                           <div className="max-h-36 overflow-y-auto space-y-1 pr-1 text-xs">
                             {filteredStock.length === 0 ? (
-                              <div className="text-center py-3 text-gray-400">Aucun produit</div>
+                              <div className="text-center py-3 text-gray-400">Aucun produit en stock</div>
                             ) : (
                               filteredStock.map(item => {
                                 const isAdded = selection.ingredientsCustom.some(i => i.id === item.id);
@@ -1482,53 +1727,75 @@ export default function AdvancedMenuPlanner() {
                             <div className="bg-orange-50/50 p-2.5 rounded-xl border border-orange-100/50 space-y-2 text-xs">
                               <div className="font-bold text-orange-850">Pas en stock ? Saisir manuellement :</div>
                               <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-2">
-                                  <select
-                                    id={`manual-planner-label-${courseKey}`}
-                                    className="w-1/2 bg-white border border-gray-250 rounded text-[10px] py-1 px-1.5 focus:outline-none font-semibold text-gray-700"
-                                  >
-                                    <option value="STANDARD">Standard</option>
-                                    <option value="BIO">BIO</option>
-                                    <option value="LABEL_ROUGE">Label Rouge</option>
-                                    <option value="HVE">HVE</option>
-                                    <option value="IGP">IGP</option>
-                                    <option value="STG">STG</option>
-                                    <option value="AOP">AOP</option>
-                                    <option value="AOG">AOG</option>
-                                    <option value="FERMIER">Fermier</option>
-                                    <option value="PECHE_DURABLE">Pêche Durable</option>
-                                  </select>
-                                  <select
-                                    id={`manual-planner-unit-${courseKey}`}
-                                    className="w-1/2 bg-white border border-gray-250 rounded text-[10px] py-1 px-1.5 focus:outline-none font-semibold text-gray-700"
-                                  >
-                                    <option value="kilo">Kilo (kg)</option>
-                                    <option value="pièce">Pièce (pc)</option>
-                                  </select>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-[9px] font-bold text-gray-500 block uppercase mb-0.5">Quantité (Chiffre direct)</label>
+                                    <input
+                                      id={`manual-planner-qty-${courseKey}`}
+                                      type="number"
+                                      step="0.1"
+                                      min="0.01"
+                                      defaultValue="1"
+                                      placeholder="ex: 15"
+                                      className="w-full bg-white border border-gray-250 rounded text-xs py-1 px-1.5 focus:outline-none font-bold text-gray-800"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-[9px] font-bold text-gray-500 block uppercase mb-0.5">Unité</label>
+                                    <select
+                                      id={`manual-planner-unit-${courseKey}`}
+                                      className="w-full bg-white border border-gray-250 rounded text-xs py-1 px-1.5 focus:outline-none font-semibold text-gray-700"
+                                    >
+                                      <option value="kilo">Kilo (kg)</option>
+                                      <option value="pièce">Pièce (pc)</option>
+                                    </select>
+                                  </div>
                                 </div>
-                                <div className="flex flex-col gap-1">
-                                  <label className="text-[9px] font-bold text-gray-400 block uppercase">Prix unitaire (€)</label>
-                                  <input
-                                    id={`manual-planner-price-${courseKey}`}
-                                    type="number"
-                                    step="0.01"
-                                    placeholder="ex: 3.50 (facultatif)"
-                                    className="w-full bg-white border border-gray-250 rounded text-[10px] py-1 px-1.5 focus:outline-none font-semibold text-gray-750"
-                                  />
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-[9px] font-bold text-gray-500 block uppercase mb-0.5">Label / Qualité</label>
+                                    <select
+                                      id={`manual-planner-label-${courseKey}`}
+                                      className="w-full bg-white border border-gray-250 rounded text-[11px] py-1 px-1.5 focus:outline-none font-semibold text-gray-700"
+                                    >
+                                      <option value="STANDARD">Standard</option>
+                                      <option value="BIO">BIO</option>
+                                      <option value="LABEL_ROUGE">Label Rouge</option>
+                                      <option value="HVE">HVE</option>
+                                      <option value="IGP">IGP</option>
+                                      <option value="STG">STG</option>
+                                      <option value="AOP">AOP</option>
+                                      <option value="AOG">AOG</option>
+                                      <option value="FERMIER">Fermier</option>
+                                      <option value="PECHE_DURABLE">Pêche Durable</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[9px] font-bold text-gray-500 block uppercase mb-0.5">Prix unitaire (€)</label>
+                                    <input
+                                      id={`manual-planner-price-${courseKey}`}
+                                      type="number"
+                                      step="0.01"
+                                      placeholder="ex: 3.50 (facultatif)"
+                                      className="w-full bg-white border border-gray-250 rounded text-xs py-1 px-1.5 focus:outline-none font-semibold text-gray-750"
+                                    />
+                                  </div>
                                 </div>
                                 <button
                                   onClick={() => {
+                                    const qtyEl = document.getElementById(`manual-planner-qty-${courseKey}`) as HTMLInputElement;
                                     const selectEl = document.getElementById(`manual-planner-label-${courseKey}`) as HTMLSelectElement;
                                     const selectUnit = document.getElementById(`manual-planner-unit-${courseKey}`) as HTMLSelectElement;
                                     const priceEl = document.getElementById(`manual-planner-price-${courseKey}`) as HTMLInputElement;
+                                    const customQty = qtyEl && parseFloat(qtyEl.value) > 0 ? parseFloat(qtyEl.value) : 1;
                                     const customLabel = selectEl ? selectEl.value : 'STANDARD';
                                     const customUnit = selectUnit ? selectUnit.value as 'kilo' | 'pièce' : 'kilo';
                                     const customPrice = priceEl && priceEl.value ? parseFloat(priceEl.value) : undefined;
-                                    handleAddCustomIngredient(courseKey, searchTerm.trim(), customLabel, customUnit, customPrice);
+                                    handleAddCustomIngredient(courseKey, searchTerm.trim(), customLabel, customUnit, customPrice, customQty);
                                   }}
-                                  className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-1.5 px-3 rounded-lg text-[10px] transition-all flex items-center justify-center gap-1 shadow-sm"
+                                  className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-1.5 px-3 rounded-lg text-xs transition-all flex items-center justify-center gap-1 shadow-sm mt-1 cursor-pointer"
                                 >
-                                  <Plus className="w-3 h-3" />
+                                  <Plus className="w-3.5 h-3.5" />
                                   Ajouter "{searchTerm.trim()}"
                                 </button>
                               </div>
@@ -1662,7 +1929,19 @@ export default function AdvancedMenuPlanner() {
                           <button onClick={() => handleFicheIngredientQty(idx, -0.5)} className="p-0.5 hover:bg-gray-100 rounded">
                             <Minus className="w-3 h-3" />
                           </button>
-                          <span className="font-bold w-10 text-center">{ing.quantiteBase}</span>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0.01"
+                            value={ing.quantiteBase}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              editingFiche.ingredients[idx].quantiteBase = Math.max(0.01, isNaN(val) ? 0.1 : Number(val.toFixed(2)));
+                              setEditingFiche({ ...editingFiche });
+                            }}
+                            className="w-14 text-center font-bold border border-gray-200 rounded px-1 py-0.5 text-xs bg-white focus:outline-none focus:border-orange-500"
+                            title="Modifier directement la quantité"
+                          />
                           <button onClick={() => handleFicheIngredientQty(idx, 0.5)} className="p-0.5 hover:bg-gray-100 rounded">
                             <Plus className="w-3 h-3" />
                           </button>
@@ -1765,30 +2044,46 @@ export default function AdvancedMenuPlanner() {
                               <option value="pièce">Pièce (pc)</option>
                             </select>
                           </div>
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[9px] font-bold text-gray-400 block uppercase">Prix unitaire (€)</label>
-                            <input
-                              id="manual-fiche-price"
-                              type="number"
-                              step="0.01"
-                              placeholder="ex: 3.50 (facultatif)"
-                              className="w-full bg-white border border-gray-250 rounded text-[10px] py-1 px-1.5 focus:outline-none font-semibold text-gray-750"
-                            />
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block uppercase">Quantité base</label>
+                              <input
+                                id="manual-fiche-qty"
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                defaultValue="1"
+                                placeholder="ex: 10"
+                                className="w-full bg-white border border-gray-250 rounded text-xs py-1 px-1.5 focus:outline-none font-bold text-gray-800"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block uppercase">Prix unitaire (€)</label>
+                              <input
+                                id="manual-fiche-price"
+                                type="number"
+                                step="0.01"
+                                placeholder="ex: 3.50 (facultatif)"
+                                className="w-full bg-white border border-gray-250 rounded text-xs py-1 px-1.5 focus:outline-none font-semibold text-gray-750"
+                              />
+                            </div>
                           </div>
                           <button
                             onClick={() => {
+                              const qtyEl = document.getElementById('manual-fiche-qty') as HTMLInputElement;
                               const selectEl = document.getElementById('manual-fiche-label') as HTMLSelectElement;
                               const selectUnit = document.getElementById('manual-fiche-unite') as HTMLSelectElement;
                               const priceEl = document.getElementById('manual-fiche-price') as HTMLInputElement;
+                              const customQty = qtyEl && parseFloat(qtyEl.value) > 0 ? parseFloat(qtyEl.value) : 1;
                               const customLabel = selectEl ? selectEl.value : 'STANDARD';
                               const customUnit = selectUnit ? selectUnit.value as 'kilo' | 'pièce' : 'kilo';
                               const customPrice = priceEl && priceEl.value ? parseFloat(priceEl.value) : undefined;
-                              handleAddFicheIngredient(searchTerm.trim(), customLabel === 'BIO', customLabel, customUnit, customPrice);
+                              handleAddFicheIngredient(searchTerm.trim(), customLabel === 'BIO', customLabel, customUnit, customPrice, customQty);
                               setSearchTerm('');
                             }}
-                            className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-1.5 px-3 rounded-lg text-[10px] transition-all flex items-center justify-center gap-1 shadow-sm"
+                            className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-1.5 px-3 rounded-lg text-xs transition-all flex items-center justify-center gap-1 shadow-sm cursor-pointer"
                           >
-                            <Plus className="w-3 h-3" />
+                            <Plus className="w-3.5 h-3.5" />
                             Ajouter "{searchTerm.trim()}"
                           </button>
                         </div>
@@ -1956,6 +2251,16 @@ export default function AdvancedMenuPlanner() {
             )}
           </div>
         </div>
+      )}
+
+      {/* TAB 4: EFFECTIFS */}
+      {activeTab === 'EFFECTIFS' && (
+        <EffectifsManager 
+          onHeadcountsUpdated={() => {
+            const list = getHeadcounts();
+            setHeadcounts(list);
+          }} 
+        />
       )}
 
     </div>
