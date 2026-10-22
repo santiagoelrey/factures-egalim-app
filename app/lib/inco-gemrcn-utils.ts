@@ -421,16 +421,24 @@ export function generateWeeklyIncoSummary(dailyReports: DailyAllergensReport[]):
 }
 
 // Calcul des tonnages requis selon les grammages GEM-RCN et les effectifs
-export function calculateGemrcnDayTonnage(
-  category: GemrcnCategory,
-  effectifs: { total: number; mat?: number; prim?: number; collAdu?: number }
-): {
+// Pour les féculents (pâtes, riz, etc.), inclut la conversion en poids sec (poids cuit ÷ 2.5)
+export interface GemrcnTonnageResult {
   totalKg: number;
   matKg: number;
   primKg: number;
   collAduKg: number;
   portionsRef: GemrcnGrammageRef;
-} {
+  isFeculent: boolean;
+  totalSecKg?: number;
+  matSecKg?: number;
+  primSecKg?: number;
+  collAduSecKg?: number;
+}
+
+export function calculateGemrcnDayTonnage(
+  category: GemrcnCategory,
+  effectifs: { total: number; mat?: number; prim?: number; collAdu?: number }
+): GemrcnTonnageResult {
   const ref = GEMRCN_PORTIONS_GRAMMES[category] || { mat: 80, prim: 100, collAdu: 150 };
 
   const matCount = effectifs.mat || 0;
@@ -453,11 +461,22 @@ export function calculateGemrcnDayTonnage(
   const collAduKg = Number(((effectiveCollAdu * ref.collAdu) / 1000).toFixed(2));
   const totalKg = Number((matKg + primKg + collAduKg).toFixed(2));
 
+  const isFeculent = category === 'FECULENTS';
+  const totalSecKg = isFeculent ? Number((totalKg / 2.5).toFixed(2)) : undefined;
+  const matSecKg = isFeculent ? Number((matKg / 2.5).toFixed(2)) : undefined;
+  const primSecKg = isFeculent ? Number((primKg / 2.5).toFixed(2)) : undefined;
+  const collAduSecKg = isFeculent ? Number((collAduKg / 2.5).toFixed(2)) : undefined;
+
   return {
     totalKg,
     matKg,
     primKg,
     collAduKg,
-    portionsRef: ref
+    portionsRef: ref,
+    isFeculent,
+    totalSecKg,
+    matSecKg,
+    primSecKg,
+    collAduSecKg
   };
 }

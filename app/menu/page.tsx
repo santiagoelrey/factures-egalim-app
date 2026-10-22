@@ -5,13 +5,18 @@ import {
   Package, Search, Plus, Minus, Trash2, Save, UtensilsCrossed, 
   CheckCircle2, Calendar, ArrowRight, Download, RefreshCw, BookOpen, 
   Users, ChevronDown, Copy, Edit3, PlusCircle, Sparkles, Check,
-  Printer, Sprout, Heart, Flag, ShieldCheck, Scale, Eye, Layers
+  Printer, Sprout, Heart, Flag, ShieldCheck, Scale, Eye, Layers,
+  DollarSign, TrendingUp, Lock, Unlock
 } from 'lucide-react';
 import { StockItem } from '../lib/types';
 import { getStock, deductFromStock } from '../lib/stock-utils';
 import EffectifsManager from './EffectifsManager';
 import MenuPrintView from './MenuPrintView';
 import InstantStockDrawer from './InstantStockDrawer';
+import CumulDepensesSection from './CumulDepensesSection';
+import { 
+  ArchivedMenuDay, saveArchivedMenu, getArchivedMenus 
+} from '../lib/menu-archive-utils';
 import { 
   DailyHeadcount, getHeadcounts, getHeadcountForDate, 
   formatDateDisplay, formatDateLongFR, normalizeDate 
@@ -59,7 +64,9 @@ interface DailyMenu {
   plat: CourseSelection;
   accompagnement: CourseSelection;
   dessert: CourseSelection;
-  valide: boolean;
+  valide: boolean; // rétrocompatibilité
+  menu_valide?: boolean; // Menu validé par le responsable/diététicien
+  stock_deduit?: boolean; // Stock physique prélevé pour le service
   convives?: number;
   date?: string; // Format ISO YYYY-MM-DD
   sans_viande?: string; // Alternative végétarienne
@@ -99,6 +106,8 @@ const emptyDailyMenu = (): DailyMenu => ({
   accompagnement: emptyCourseSelection(),
   dessert: emptyCourseSelection(),
   valide: false,
+  menu_valide: false,
+  stock_deduit: false,
   badge_jour: 'STANDARD',
   sans_viande: ''
 });
@@ -150,7 +159,7 @@ const DEFAULT_FICHES: FicheTechnique[] = [
 ];
 
 export default function AdvancedMenuPlanner() {
-  const [activeTab, setActiveTab] = useState<'PLANNER' | 'RECIPES' | 'TEMPLATES' | 'EFFECTIFS'>('PLANNER');
+  const [activeTab, setActiveTab] = useState<'PLANNER' | 'RECIPES' | 'TEMPLATES' | 'EFFECTIFS' | 'CUMUL_DEPENSES'>('PLANNER');
   const [weeklyPlan, setWeeklyPlan] = useState<WeeklyPlan>({
     Lundi: emptyDailyMenu(),
     Mardi: emptyDailyMenu(),
@@ -858,17 +867,102 @@ export default function AdvancedMenuPlanner() {
     };
   };
 
-  // Validate Menu (Deduct from Stock)
-  const handleValidateDay = () => {
+  // Helper to construct and archive a day's menu permanently
+  const archiveCurrentDayMenu = (dayName: string, plan: WeeklyPlan) => {
+    const dayMenu = plan[dayName];
+    if (!dayMenu) return;
+    const dateIso = getDayDate(dayName);
+    const dayConvives = dayMenu.convives || 100;
+    const hc = getHeadcountForDate(dateIso);
+
+    const getCourseDetail = (cKey: 'entree' | 'plat' | 'accompagnement' | 'dessert') => {
+      const sel = dayMenu[cKey];
+      const fiche = fiches.find(f => f.id === sel.ficheId);
+      const title = sel.intitule || fiche?.nom || '';
+      const cost = calculateCourseCost(sel, dayConvives);
+      const perRepas = dayConvives > 0 ? cost / dayConvives : 0;
+      return {
+        intitule: title,
+        ficheId: sel.ficheId || undefined,
+        coutTotal: Number(cost.toFixed(2)),
+        coutParRepas: Number(perRepas.toFixed(2))
+      };
+    };
+
+    const e = getCourseDetail('entree');
+    const p = getCourseDetail('plat');
+    const a = getCourseDetail('accompagnement');
+    const d = getCourseDetail('dessert');
+    const totalCost = Number((e.coutTotal + p.coutTotal + a.coutTotal + d.coutTotal).toFixed(2));
+    const perPerson = Number((dayConvives > 0 ? totalCost / dayConvives : 0).toFixed(2));
+
+    const archivedItem: ArchivedMenuDay = {
+      id: `menu-${dayName}-${dateIso}`,
+      date: dateIso,
+      jourSemaine: dayName,
+      weekNom: savedWeeks.find(w => w.id === activeWeekId)?.nom || 'Semaine scolaire',
+      convives: dayConvives,
+      maternelle: hc?.maternelle,
+      elementaire: hc?.elementaire,
+      adultes: hc?.adultes,
+      entree: e,
+      plat: p,
+      accompagnement: a,
+      dessert: d,
+      sans_viande: dayMenu.sans_viande,
+      badge_jour: dayMenu.badge_jour,
+      notes_jour: dayMenu.notes_jour,
+      coutTotalJour: totalCost,
+      coutParRepasJour: perPerson,
+      menu_valide: Boolean(dayMenu.menu_valide),
+      stock_deduit: Boolean(dayMenu.stock_deduit),
+      date_validation_menu: dayMenu.menu_valide ? new Date().toISOString() : undefined,
+      date_deduction_stock: dayMenu.stock_deduit ? new Date().toISOString() : undefined
+    };
+
+    saveArchivedMenu(archivedItem);
+  };
+
+  // 1. Bouton "Valider le Menu" (Enregistre, fige et mémorise sans toucher aux stocks)
+  const handleToggleValidateMenu = () => {
     const dayMenu = weeklyPlan[activeDay];
-    if (dayMenu.valide) {
-      alert("Ce jour a déjà été validé.");
+    const isCurrentlyValid = Boolean(dayMenu.menu_valide);
+    const newPlan = { ...weeklyPlan };
+
+    if (!isCurrentlyValid) {
+      const hasContent = dayMenu.entree.intitule || dayMenu.plat.intitule || dayMenu.accompagnement.intitule || dayMenu.dessert.intitule || dayMenu.entree.ficheId || dayMenu.plat.ficheId;
+      if (!hasContent) {
+        alert("Veuillez renseigner au moins un plat avant de valider le menu.");
+        return;
+      }
+      newPlan[activeDay].menu_valide = true;
+      savePlan(newPlan);
+      archiveCurrentDayMenu(activeDay, newPlan);
+      alert(`🎉 Menu du ${activeDay} validé et mémorisé avec succès pour ${dayMenu.convives || 100} convives !\nLe stock reste intact jusqu'au service en cuisine.`);
+    } else {
+      if (dayMenu.stock_deduit) {
+        if (!confirm("Ce menu a déjà eu ses stocks déduits. Voulez-vous tout de même déverrouiller la conception du menu ?")) {
+          return;
+        }
+      }
+      newPlan[activeDay].menu_valide = false;
+      savePlan(newPlan);
+      archiveCurrentDayMenu(activeDay, newPlan);
+      alert(`Le menu du ${activeDay} a été déverrouillé et repassé en mode brouillon.`);
+    }
+  };
+
+  // 2. Bouton "Valider & Déduire du Stock" (Sortie réelle de stock le jour du service)
+  const handleValidateAndDeductStock = () => {
+    const dayMenu = weeklyPlan[activeDay];
+    if (dayMenu.stock_deduit) {
+      alert("Les stocks pour ce jour ont déjà été déduits.");
       return;
     }
 
     const dayIngredients = getDayIngredients(dayMenu);
     if (dayIngredients.length === 0) {
-      alert("Veuillez planifier des plats et ajouter des ingrédients avant de valider.");
+      alert("Veuillez planifier des plats et ajouter des ingrédients avant de déduire du stock.");
       return;
     }
 
@@ -884,29 +978,32 @@ export default function AdvancedMenuPlanner() {
     });
 
     if (missingInfo) {
-      if (!confirm(`Attention ! Certains ingrédients sont manquants ou insuffisants en stock :\n${missingInfo}\nVoulez-vous tout de même forcer la validation ?`)) {
+      if (!confirm(`Attention ! Certains ingrédients sont manquants ou insuffisants en stock :\n${missingInfo}\nVoulez-vous tout de même forcer la sortie de stock ?`)) {
         return;
       }
     }
 
-    if (confirm(`Valider le menu de ${activeDay} pour ${dayMenu.convives || 100} convives et déduire les ingrédients du stock ?`)) {
-      // Deduct from stock
+    if (confirm(`Déduire immédiatement les ingrédients du stock pour le service du ${activeDay} (${dayMenu.convives || 100} convives) ?`)) {
       dayIngredients.forEach(ing => {
-        // Only deduct if it matches an actual stock item
         if (!ing.id.startsWith('recipe-')) {
           deductFromStock(ing.id, ing.quantite);
         }
       });
 
-      // Mark day as validated
       const newPlan = { ...weeklyPlan };
       newPlan[activeDay].valide = true;
+      newPlan[activeDay].menu_valide = true;
+      newPlan[activeDay].stock_deduit = true;
       savePlan(newPlan);
+      archiveCurrentDayMenu(activeDay, newPlan);
 
       setStock(getStock());
-      alert(`Menu du ${activeDay} validé avec succès pour ${convives} convives !`);
+      alert(`Sortie de stock effectuée avec succès pour le ${activeDay} (${dayMenu.convives || 100} convives) !`);
     }
   };
+
+  // Alias pour rétrocompatibilité
+  const handleValidateDay = handleValidateAndDeductStock;
 
   // Save current week plan as Template
   const handleSaveAsTemplate = () => {
@@ -1178,6 +1275,15 @@ export default function AdvancedMenuPlanner() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('CUMUL_DEPENSES')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === 'CUMUL_DEPENSES' ? 'bg-orange-500 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <TrendingUp className="w-4 h-4" />
+            Cumul Dépenses & Archives
+          </button>
         </div>
       </div>
 
@@ -1431,14 +1537,19 @@ export default function AdvancedMenuPlanner() {
           {/* Day selection tabs */}
           <div className="bg-white p-2 rounded-2xl shadow-sm border border-gray-100 flex flex-wrap gap-1">
             {DAYS.map(day => {
-              const isValidated = weeklyPlan[day].valide;
+              const dm = weeklyPlan[day];
+              const isStockDeduit = Boolean(dm.stock_deduit || dm.valide);
+              const isMenuValide = Boolean(dm.menu_valide);
               const { status } = getDayStockStatus(day);
-              const dayMeals = weeklyPlan[day].convives || 100;
+              const dayMeals = dm.convives || 100;
               const dayDateFormatted = formatDateDisplay(getDayDate(day));
+              const dayTotalCost = calculateCourseCost(dm.entree, dayMeals) + calculateCourseCost(dm.plat, dayMeals) + calculateCourseCost(dm.accompagnement, dayMeals) + calculateCourseCost(dm.dessert, dayMeals);
+              const dayCostPerMeal = dayMeals > 0 ? dayTotalCost / dayMeals : 0;
               
               return (
                 <button
                   key={day}
+                  type="button"
                   onClick={() => {
                     setActiveDay(day);
                     setAddingCustomIngredientTo(null);
@@ -1453,7 +1564,7 @@ export default function AdvancedMenuPlanner() {
                       setConvives(weeklyPlan[day]?.convives || (hc ? hc.total : 100));
                     }
                   }}
-                  className={`flex-1 min-w-[110px] py-3 px-3 rounded-xl font-bold text-xs transition-all flex flex-col items-center gap-1 ${
+                  className={`flex-1 min-w-[125px] py-3 px-3 rounded-xl font-bold text-xs transition-all flex flex-col items-center gap-1 cursor-pointer ${
                     activeDay === day
                       ? 'bg-orange-500 text-white shadow-md shadow-orange-100'
                       : 'text-gray-600 hover:bg-gray-50'
@@ -1465,9 +1576,14 @@ export default function AdvancedMenuPlanner() {
                   <span className={`text-[10px] ${activeDay === day ? 'text-orange-100' : 'text-gray-400'}`}>
                     {dayDateFormatted} • {dayMeals} repas
                   </span>
+                  <span className={`text-[11px] font-black ${activeDay === day ? 'text-white' : 'text-orange-600'}`}>
+                    {dayCostPerMeal > 0 ? `${dayCostPerMeal.toFixed(2)} €/u` : '0.00 €'}
+                  </span>
                   <div className="flex gap-1 mt-0.5">
-                    {isValidated ? (
-                      <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded-full font-extrabold">✓ Déduit</span>
+                    {isStockDeduit ? (
+                      <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded-full font-extrabold">📦 Stock sorti</span>
+                    ) : isMenuValide ? (
+                      <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded-full font-extrabold">✓ Validé</span>
                     ) : status === 'READY' ? (
                       <span className="text-[9px] bg-emerald-500 text-white px-1.5 py-0.5 rounded-full font-extrabold">🟢 Prêt</span>
                     ) : status === 'MISSING' ? (
@@ -1479,15 +1595,19 @@ export default function AdvancedMenuPlanner() {
             })}
           </div>
 
-          {/* Status Bar with Stock Alerts */}
+          {/* Status Bar with Stock Alerts & TWO Validation Buttons */}
           {(() => {
             const dayMenu = weeklyPlan[activeDay];
+            const isMenuValide = Boolean(dayMenu.menu_valide);
+            const isStockDeduit = Boolean(dayMenu.stock_deduit || dayMenu.valide);
             const { status, missing } = getDayStockStatus(activeDay);
             
             return (
               <div className={`p-5 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all ${
-                dayMenu.valide 
-                  ? 'bg-green-50 border-green-200 text-green-800' 
+                isStockDeduit 
+                  ? 'bg-blue-50/80 border-blue-200 text-blue-900'
+                  : isMenuValide
+                  ? 'bg-green-50 border-green-200 text-green-900' 
                   : status === 'READY'
                   ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                   : status === 'MISSING'
@@ -1498,9 +1618,13 @@ export default function AdvancedMenuPlanner() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xl">📅</span>
                     <span className="font-extrabold text-gray-800 text-lg">Menu du {activeDay}</span>
-                    {dayMenu.valide ? (
-                      <span className="px-2.5 py-1 rounded-full bg-green-200 text-green-900 text-xs font-extrabold">
-                        ✓ Validé (Stock déduit)
+                    {isStockDeduit ? (
+                      <span className="px-2.5 py-1 rounded-full bg-blue-200 text-blue-900 text-xs font-extrabold flex items-center gap-1">
+                        📦 Stock Déduit (Service Cuisiné)
+                      </span>
+                    ) : isMenuValide ? (
+                      <span className="px-2.5 py-1 rounded-full bg-green-200 text-green-900 text-xs font-extrabold flex items-center gap-1">
+                        ✓ Menu Validé (Mémorisé en archive)
                       </span>
                     ) : status === 'READY' ? (
                       <span className="px-2.5 py-1 rounded-full bg-emerald-200 text-emerald-900 text-xs font-extrabold">
@@ -1518,7 +1642,7 @@ export default function AdvancedMenuPlanner() {
                   </div>
                   
                   {/* Missing items display list */}
-                  {!dayMenu.valide && status === 'MISSING' && (
+                  {!isStockDeduit && status === 'MISSING' && (
                     <div className="text-xs text-amber-700 font-semibold space-y-1 pt-1.5">
                       <span>⚠️ Ingrédients insuffisants pour {dayMenu.convives || 100} convives :</span>
                       <ul className="list-disc list-inside pl-2 space-y-0.5">
@@ -1531,31 +1655,66 @@ export default function AdvancedMenuPlanner() {
                     </div>
                   )}
                   
-                  {!dayMenu.valide && status === 'READY' && (
+                  {!isStockDeduit && status === 'READY' && !isMenuValide && (
                     <p className="text-xs text-emerald-700 font-medium pt-1">
                       🎉 Tous les ingrédients requis sont disponibles en stock.
                     </p>
                   )}
 
-                  {!dayMenu.valide && status === 'EMPTY' && (
+                  {isMenuValide && !isStockDeduit && (
+                    <p className="text-xs text-green-700 font-medium pt-1">
+                      ✅ Le menu est validé et archivé. Vous pouvez déduire les stocks le jour de la préparation.
+                    </p>
+                  )}
+
+                  {!isStockDeduit && status === 'EMPTY' && (
                     <p className="text-xs text-gray-500 font-medium pt-1">
                       Aucun plat planifié pour ce jour. Sélectionnez une fiche technique ou tapez un titre.
                     </p>
                   )}
                 </div>
                 
-                {!dayMenu.valide && status !== 'EMPTY' && (
-                  <button
-                    onClick={handleValidateDay}
-                    className={`px-6 py-3 rounded-xl font-bold text-white transition-all text-xs shadow-md shrink-0 ${
-                      status === 'READY'
-                        ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-100 hover:scale-105 active:scale-95'
-                        : 'bg-amber-600 hover:bg-amber-700 shadow-amber-100 hover:scale-105 active:scale-95'
-                    }`}
-                  >
-                    Valider & Déduire du Stock
-                  </button>
-                )}
+                {/* ACTION BUTTONS: 1. Valider le Menu | 2. Valider & Déduire du Stock */}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {/* BOUTON 1: Valider le Menu / Déverrouiller */}
+                  {status !== 'EMPTY' && (
+                    <button
+                      type="button"
+                      onClick={handleToggleValidateMenu}
+                      className={`px-4 py-2.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 shadow-sm cursor-pointer ${
+                        isMenuValide
+                          ? 'bg-white text-green-800 border border-green-300 hover:bg-green-50'
+                          : 'bg-green-600 hover:bg-green-700 text-white hover:scale-102 active:scale-98'
+                      }`}
+                      title={isMenuValide ? "Déverrouiller le menu pour le modifier" : "Valider et mémoriser le menu sans déduire le stock"}
+                    >
+                      {isMenuValide ? <Unlock className="w-4 h-4 text-green-600" /> : <CheckCircle2 className="w-4 h-4" />}
+                      <span>{isMenuValide ? 'Déverrouiller Menu' : 'Valider le Menu'}</span>
+                    </button>
+                  )}
+
+                  {/* BOUTON 2: Valider & Déduire du Stock */}
+                  {!isStockDeduit && status !== 'EMPTY' ? (
+                    <button
+                      type="button"
+                      onClick={handleValidateAndDeductStock}
+                      className={`px-5 py-2.5 rounded-xl font-bold text-white transition-all text-xs shadow-md flex items-center gap-1.5 cursor-pointer ${
+                        status === 'READY'
+                          ? 'bg-slate-900 hover:bg-black hover:scale-102 active:scale-98'
+                          : 'bg-amber-600 hover:bg-amber-700 hover:scale-102 active:scale-98'
+                      }`}
+                      title="Sortir définitivement les ingrédients du stock pour ce service"
+                    >
+                      <Package className="w-4 h-4 text-orange-400" />
+                      <span>Valider & Déduire Stock</span>
+                    </button>
+                  ) : isStockDeduit ? (
+                    <span className="px-3.5 py-2 bg-blue-100 text-blue-900 border border-blue-200 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                      <Check className="w-4 h-4 text-blue-700" />
+                      Stock Déduit
+                    </span>
+                  ) : null}
+                </div>
               </div>
             );
           })()}
@@ -1773,15 +1932,21 @@ export default function AdvancedMenuPlanner() {
                           </span>
                         </div>
                         <div className="flex justify-between items-center text-slate-400">
-                          <span>Tonnage requis</span>
+                          <span>{item.tonnage.isFeculent ? 'Poids cuit servi' : 'Tonnage requis'}</span>
                           <span className="text-orange-400 font-extrabold text-xs">
                             {item.hasDish ? `${item.tonnage.totalKg.toFixed(1)} kg` : '—'}
                           </span>
                         </div>
+                        {item.tonnage.isFeculent && item.hasDish && (
+                          <div className="flex justify-between items-center bg-amber-950/60 border border-amber-500/40 px-2 py-1 rounded text-amber-300 font-bold text-[10px]">
+                            <span>🌾 Poids sec (÷ 2.5) :</span>
+                            <span className="text-white font-black text-xs">{item.tonnage.totalSecKg?.toFixed(1)} kg sec</span>
+                          </div>
+                        )}
                         <div className="text-[9px] text-slate-400 border-t border-slate-800 pt-1 flex justify-between">
-                          <span>Mat: {item.tonnage.matKg.toFixed(1)}kg</span>
-                          <span>Prim: {item.tonnage.primKg.toFixed(1)}kg</span>
-                          <span>Adu: {item.tonnage.collAduKg.toFixed(1)}kg</span>
+                          <span>Mat: {item.tonnage.isFeculent ? `${item.tonnage.matSecKg}kg sec` : `${item.tonnage.matKg.toFixed(1)}kg`}</span>
+                          <span>Prim: {item.tonnage.isFeculent ? `${item.tonnage.primSecKg}kg sec` : `${item.tonnage.primKg.toFixed(1)}kg`}</span>
+                          <span>Adu: {item.tonnage.isFeculent ? `${item.tonnage.collAduSecKg}kg sec` : `${item.tonnage.collAduKg.toFixed(1)}kg`}</span>
                         </div>
                       </div>
                     </div>
@@ -2631,6 +2796,11 @@ export default function AdvancedMenuPlanner() {
             setHeadcounts(list);
           }} 
         />
+      )}
+
+      {/* TAB 5: CUMUL DÉPENSES & ARCHIVES */}
+      {activeTab === 'CUMUL_DEPENSES' && (
+        <CumulDepensesSection />
       )}
 
       {/* DRAWER STOCK À L'INSTANTANÉ */}
