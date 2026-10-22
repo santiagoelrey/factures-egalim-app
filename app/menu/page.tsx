@@ -4,15 +4,23 @@ import { useState, useEffect } from 'react';
 import { 
   Package, Search, Plus, Minus, Trash2, Save, UtensilsCrossed, 
   CheckCircle2, Calendar, ArrowRight, Download, RefreshCw, BookOpen, 
-  Users, ChevronDown, Copy, Edit3, PlusCircle, Sparkles, Check
+  Users, ChevronDown, Copy, Edit3, PlusCircle, Sparkles, Check,
+  Printer, Sprout, Heart, Flag, ShieldCheck, Scale, Eye, Layers
 } from 'lucide-react';
 import { StockItem } from '../lib/types';
 import { getStock, deductFromStock } from '../lib/stock-utils';
 import EffectifsManager from './EffectifsManager';
+import MenuPrintView from './MenuPrintView';
+import InstantStockDrawer from './InstantStockDrawer';
 import { 
   DailyHeadcount, getHeadcounts, getHeadcountForDate, 
   formatDateDisplay, formatDateLongFR, normalizeDate 
 } from '../lib/effectifs-utils';
+import { 
+  GEMRCN_CONFIG, GemrcnCategory, detectGemrcnCategory, 
+  calculateGemrcnDayTonnage, GEMRCN_PORTIONS_GRAMMES,
+  analyzeDailyAllergens 
+} from '../lib/inco-gemrcn-utils';
 
 // Interfaces for Technical Sheets
 interface RecipeIngredient {
@@ -54,6 +62,9 @@ interface DailyMenu {
   valide: boolean;
   convives?: number;
   date?: string; // Format ISO YYYY-MM-DD
+  sans_viande?: string; // Alternative végétarienne
+  badge_jour?: 'VEGETARIEN' | 'BIO' | 'SURPRISE' | 'FERIE' | 'STANDARD';
+  notes_jour?: string;
 }
 
 interface WeeklyPlan {
@@ -87,7 +98,9 @@ const emptyDailyMenu = (): DailyMenu => ({
   plat: emptyCourseSelection(),
   accompagnement: emptyCourseSelection(),
   dessert: emptyCourseSelection(),
-  valide: false
+  valide: false,
+  badge_jour: 'STANDARD',
+  sans_viande: ''
 });
 
 // Default recipes (Fiches Techniques) to populate the library initially
@@ -165,6 +178,10 @@ export default function AdvancedMenuPlanner() {
   // Search/Add custom ingredients state
   const [addingCustomIngredientTo, setAddingCustomIngredientTo] = useState<'entree' | 'plat' | 'accompagnement' | 'dessert' | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Modales & Volets instantanés
+  const [isInstantStockOpen, setIsInstantStockOpen] = useState(false);
+  const [isPrintPosterOpen, setIsPrintPosterOpen] = useState(false);
 
   // Déduire la date calendaire d'un jour donné (Lundi -> Vendredi)
   const inferDayDate = (dayName: string): string => {
@@ -254,6 +271,27 @@ export default function AdvancedMenuPlanner() {
     } else {
       alert("Aucun effectif correspondant aux dates de cette semaine n'a été trouvé dans la base.");
     }
+  };
+
+  const handleSetDayBadge = (badge: 'STANDARD' | 'VEGETARIEN' | 'BIO' | 'SURPRISE' | 'FERIE') => {
+    const newPlan = { ...weeklyPlan };
+    if (!newPlan[activeDay]) return;
+    newPlan[activeDay].badge_jour = badge;
+    savePlan(newPlan);
+  };
+
+  const handleSetSansViande = (text: string) => {
+    const newPlan = { ...weeklyPlan };
+    if (!newPlan[activeDay]) return;
+    newPlan[activeDay].sans_viande = text;
+    savePlan(newPlan);
+  };
+
+  const handleSetNotesJour = (text: string) => {
+    const newPlan = { ...weeklyPlan };
+    if (!newPlan[activeDay]) return;
+    newPlan[activeDay].notes_jour = text;
+    savePlan(newPlan);
   };
 
   // Load everything on mount
@@ -1069,6 +1107,20 @@ export default function AdvancedMenuPlanner() {
   const courseIcons = { entree: '🥗', plat: '🍗', accompagnement: '🥔', dessert: '🍰' };
   const courseLabels = { entree: 'Entrée', plat: 'Plat Principal', accompagnement: 'Accompagnement', dessert: 'Dessert' };
 
+  if (isPrintPosterOpen) {
+    const activeWeekObj = savedWeeks.find(w => w.id === activeWeekId) || savedWeeks[0];
+    return (
+      <MenuPrintView
+        weekName={activeWeekObj?.nom || "Semaine scolaire"}
+        weeklyPlan={weeklyPlan}
+        fiches={fiches}
+        getDayDate={getDayDate}
+        getHeadcountForDate={getHeadcountForDate}
+        onBack={() => setIsPrintPosterOpen(false)}
+      />
+    );
+  }
+
   return (
     <div className="max-w-6xl mx-auto p-4 md:p-8 space-y-8 pb-24">
       
@@ -1274,20 +1326,50 @@ export default function AdvancedMenuPlanner() {
 
             <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
               <button
+                onClick={() => setIsInstantStockOpen(true)}
+                className="flex items-center gap-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-3.5 py-2.5 rounded-xl font-bold transition-all text-xs cursor-pointer shadow-xs"
+                title="Consulter les stocks en direct et les consommations projetées"
+              >
+                <Package className="w-4 h-4 text-blue-600" />
+                Stock à l'instantané
+                {getDayStockStatus(activeDay).status === 'MISSING' && (
+                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                )}
+              </button>
+
+              <button
                 onClick={handleSyncWeekWithHeadcounts}
                 className="flex items-center gap-1.5 bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 px-3.5 py-2.5 rounded-xl font-bold transition-all text-xs cursor-pointer shadow-xs"
                 title="Synchroniser tous les jours de la semaine avec la base d'effectifs"
               >
                 <Sparkles className="w-4 h-4 text-orange-500" />
-                Sync toute la semaine ({headcounts.length} en base)
+                Sync semaine ({headcounts.length})
+              </button>
+
+              <button
+                onClick={() => setIsPrintPosterOpen(true)}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-black text-white px-4 py-2.5 rounded-xl font-black transition-all text-xs shadow-md cursor-pointer hover:scale-102 active:scale-98"
+                title="Imprimer l'Affiche Hebdomadaire officielle avec Allergènes INCO et GEM-RCN"
+              >
+                <Printer className="w-4 h-4 text-orange-400" />
+                Imprimer Affiche Menu (INCO)
+              </button>
+
+              <button
+                onClick={() => window.print()}
+                className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-3 py-2.5 rounded-xl font-bold transition-all text-xs shadow-xs cursor-pointer"
+                title="Imprimer cette section"
+              >
+                <Printer className="w-4 h-4 text-slate-600" />
+                Imprimer cette section
               </button>
 
               <button
                 onClick={handleExportCSV}
-                className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-4 py-2.5 rounded-xl font-bold transition-all text-xs shadow-sm cursor-pointer"
+                className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-3 py-2.5 rounded-xl font-bold transition-all text-xs shadow-sm cursor-pointer"
               >
                 <Download className="w-4 h-4" />
-                Fiche de Cuisine (CSV)
+                CSV
               </button>
             </div>
           </div>
@@ -1465,6 +1547,265 @@ export default function AdvancedMenuPlanner() {
                     Valider & Déduire du Stock
                   </button>
                 )}
+              </div>
+            );
+          })()}
+
+          {/* DAY CONFIGURATION & SPECIFICITIES (BADGES, SANS VIANDE, NOTES) */}
+          {(() => {
+            const dayMenu = weeklyPlan[activeDay];
+            const currentBadge = dayMenu.badge_jour || 'STANDARD';
+
+            return (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+                  <div className="flex items-center gap-2">
+                    <Flag className="w-4 h-4 text-orange-500" />
+                    <span className="font-extrabold text-sm text-gray-800">Spécificités & Options du {activeDay}</span>
+                    <span className="text-[10px] text-gray-400">({formatDateDisplay(getDayDate(activeDay))})</span>
+                  </div>
+                  
+                  {/* Badge selector buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[
+                      { key: 'STANDARD', label: '🍽️ Standard', desc: 'Journée ordinaire' },
+                      { key: 'VEGETARIEN', label: '🌿 Végétarien', desc: 'Loi EGAlim hebdo obligatoire' },
+                      { key: 'BIO', label: '🌱 100% Bio', desc: 'Repas certifié Bio' },
+                      { key: 'SURPRISE', label: '⭐ Thématique / Fête', desc: 'Menu spécial' },
+                      { key: 'FERIE', label: '⛔ Férié / Fermé', desc: 'Pas de service' }
+                    ].map(b => (
+                      <button
+                        key={b.key}
+                        type="button"
+                        onClick={() => handleSetDayBadge(b.key as any)}
+                        disabled={dayMenu.valide}
+                        title={b.desc}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                          currentBadge === b.key
+                            ? b.key === 'VEGETARIEN'
+                              ? 'bg-emerald-600 text-white shadow-xs scale-102'
+                              : b.key === 'BIO'
+                              ? 'bg-green-700 text-white shadow-xs scale-102'
+                              : b.key === 'SURPRISE'
+                              ? 'bg-amber-500 text-white shadow-xs scale-102'
+                              : b.key === 'FERIE'
+                              ? 'bg-rose-600 text-white shadow-xs scale-102'
+                              : 'bg-slate-900 text-white shadow-xs scale-102'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {b.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                  {/* Alternative Sans Viande */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                      <Sprout className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Alternative Végétarienne / Sans Viande</span>
+                      <span className="text-[10px] text-gray-400 font-normal">(Affiche INCO & PAI)</span>
+                    </label>
+                    <input
+                      type="text"
+                      disabled={dayMenu.valide}
+                      placeholder={currentBadge === 'VEGETARIEN' ? 'Menu végétarien pour tous ce jour' : 'ex: Sauté végétal aux petits légumes, Omelette bio...'}
+                      value={dayMenu.sans_viande || ''}
+                      onChange={(e) => handleSetSansViande(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl border border-gray-250 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-semibold text-gray-800"
+                    />
+                  </div>
+
+                  {/* Notes & Animation */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                      <span>📝 Notes, Événement ou Animation du Jour</span>
+                      <span className="text-[10px] text-gray-400 font-normal">(Visible sur affiche)</span>
+                    </label>
+                    <input
+                      type="text"
+                      disabled={dayMenu.valide}
+                      placeholder="ex: Pain bio au levain & Vinaigrette maison, Semaine du Goût..."
+                      value={dayMenu.notes_jour || ''}
+                      onChange={(e) => handleSetNotesJour(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl border border-gray-250 bg-gray-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500 text-xs font-semibold text-gray-800"
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* LIVE GEM-RCN DIRECT CALCULATION & NUTRITIONAL TONNAGE */}
+          {(() => {
+            const dayMenu = weeklyPlan[activeDay];
+            const dateIso = getDayDate(activeDay);
+            const hc = getHeadcountForDate(dateIso);
+            const totalRepas = dayMenu.convives || (hc ? hc.total : 100);
+
+            // Ventilation des effectifs selon base de données ou répartition cantine scolaire standard
+            const matRepas = hc?.maternelle ?? Math.round(totalRepas * 0.20);
+            const elemRepas = hc?.elementaire ?? Math.round(totalRepas * 0.45);
+            const aduRepas = hc?.adultes ?? Math.max(0, totalRepas - (matRepas + elemRepas));
+
+            const coursesKeys = ['entree', 'plat', 'accompagnement', 'dessert'] as const;
+
+            // Analyse GEM-RCN pour chaque composant
+            const gemrcnBreakdown = coursesKeys.map(ck => {
+              const sel = dayMenu[ck];
+              const linkedFiche = fiches.find(f => f.id === sel.ficheId);
+              const title = sel.intitule || linkedFiche?.nom || '';
+              const category: GemrcnCategory = detectGemrcnCategory(title, ck);
+              const config = GEMRCN_CONFIG[category];
+              const tonnage = calculateGemrcnDayTonnage(category, {
+                total: totalRepas,
+                mat: matRepas,
+                prim: elemRepas,
+                collAdu: aduRepas
+              });
+
+              return {
+                courseKey: ck,
+                title: title || 'Non renseigné',
+                hasDish: Boolean(title.trim()),
+                category,
+                config,
+                tonnage
+              };
+            });
+
+            // Tonnage cumulé de la journée
+            const totalDailyKg = gemrcnBreakdown.reduce((sum, item) => sum + (item.hasDish ? item.tonnage.totalKg : 0), 0);
+
+            // Allergènes INCO du jour
+            const dayCoursesForInco = gemrcnBreakdown
+              .filter(i => i.hasDish)
+              .map(i => {
+                const sel = dayMenu[i.courseKey];
+                const linkedFiche = fiches.find(f => f.id === sel.ficheId);
+                const ingNames: string[] = [];
+                if (linkedFiche?.ingredients) {
+                  linkedFiche.ingredients.forEach(ing => ingNames.push(ing.produit));
+                }
+                if (sel.ingredientsCustom) {
+                  sel.ingredientsCustom.forEach(ing => ingNames.push(ing.produit));
+                }
+                return { intitule: i.title, ingredients: ingNames };
+              });
+
+            const dailyAllergensReport = analyzeDailyAllergens(activeDay, dayCoursesForInco);
+
+            return (
+              <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white rounded-2xl shadow-md p-6 space-y-5 border border-slate-700">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-700 pb-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Scale className="w-5 h-5 text-orange-400" />
+                      <h3 className="font-black text-base tracking-wide flex items-center gap-2">
+                        Calcul Direct GEM-RCN & Tonnages Quotidiens
+                        <span className="text-[10px] bg-orange-500/30 text-orange-300 border border-orange-400/40 px-2 py-0.5 rounded-full font-bold">
+                          GEM-RCN 2.0
+                        </span>
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-300">
+                      Calcul dynamique en temps réel selon les grammages officiels et les effectifs réels ({totalRepas} repas)
+                    </p>
+                  </div>
+
+                  {/* Headcounts Breakdown Badges */}
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-slate-300">
+                      Maternelle : <strong className="text-white">{matRepas}</strong>
+                    </span>
+                    <span className="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-slate-300">
+                      Élémentaire : <strong className="text-white">{elemRepas}</strong>
+                    </span>
+                    <span className="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-slate-300">
+                      Adultes / Collège : <strong className="text-white">{aduRepas}</strong>
+                    </span>
+                    <span className="px-3 py-1 bg-orange-500 text-white rounded-lg font-black shadow-xs">
+                      Total : {totalDailyKg.toFixed(1)} kg prévus
+                    </span>
+                  </div>
+                </div>
+
+                {/* 4 Courses GEM-RCN & Grammage Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {gemrcnBreakdown.map((item) => (
+                    <div
+                      key={item.courseKey}
+                      className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-3.5 space-y-2.5 flex flex-col justify-between"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-400 font-extrabold uppercase text-[10px] tracking-wider">
+                            {courseLabels[item.courseKey]}
+                          </span>
+                          <span
+                            className="text-[9px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider text-white"
+                            style={{ backgroundColor: item.config.colorHex }}
+                          >
+                            {item.config.label}
+                          </span>
+                        </div>
+                        <div className="font-bold text-sm text-white truncate" title={item.title}>
+                          {item.title}
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-900/90 rounded-lg p-2.5 space-y-1.5 text-[11px] border border-slate-700/50">
+                        <div className="flex justify-between items-center text-slate-400">
+                          <span>Grammage réf.</span>
+                          <span className="text-slate-200 font-bold">
+                            {item.tonnage.portionsRef.mat}g / {item.tonnage.portionsRef.prim}g / {item.tonnage.portionsRef.collAdu}g
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center text-slate-400">
+                          <span>Tonnage requis</span>
+                          <span className="text-orange-400 font-extrabold text-xs">
+                            {item.hasDish ? `${item.tonnage.totalKg.toFixed(1)} kg` : '—'}
+                          </span>
+                        </div>
+                        <div className="text-[9px] text-slate-400 border-t border-slate-800 pt-1 flex justify-between">
+                          <span>Mat: {item.tonnage.matKg.toFixed(1)}kg</span>
+                          <span>Prim: {item.tonnage.primKg.toFixed(1)}kg</span>
+                          <span>Adu: {item.tonnage.collAduKg.toFixed(1)}kg</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* INCO Allergens synthesis for the day */}
+                <div className="pt-2 border-t border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span className="font-bold text-slate-300">Allergènes INCO identifiés ce jour :</span>
+                    {dailyAllergensReport.itemsWithAllergens.length === 0 ? (
+                      <span className="text-slate-400 italic">Aucun allergène majeur détecté (ou plats non renseignés)</span>
+                    ) : (
+                      dailyAllergensReport.itemsWithAllergens.map(a => (
+                        <span
+                          key={a.allergenNom}
+                          className="px-2 py-0.5 rounded-md bg-amber-400/20 text-amber-200 border border-amber-400/30 text-[10px] font-bold"
+                          title={a.sources.join(', ')}
+                        >
+                          {a.allergenNom}
+                        </span>
+                      ))
+                    )}
+                    <span className="text-[10px] text-slate-400 ml-1">
+                      (🍞 Pain bio quotidien inclus : Gluten)
+                    </span>
+                  </div>
+
+                  <div className="text-[11px] text-slate-400 shrink-0">
+                    Conforme Décret 2011-1227 & GEM-RCN
+                  </div>
+                </div>
               </div>
             );
           })()}
@@ -1839,6 +2180,15 @@ export default function AdvancedMenuPlanner() {
                   Modifier la Fiche Technique
                 </h2>
                 <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold border border-slate-200 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    title="Imprimer cette fiche technique"
+                  >
+                    <Printer className="w-4 h-4 text-slate-600" />
+                    Imprimer
+                  </button>
                   <button 
                     onClick={() => setEditingFiche(null)}
                     className="px-4 py-2 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-50"
@@ -2096,15 +2446,26 @@ export default function AdvancedMenuPlanner() {
           ) : (
             /* Recipes Grid View */
             <div className="space-y-4">
-              <div className="flex justify-between items-center">
+              <div className="flex justify-between items-center flex-wrap gap-2">
                 <span className="text-sm text-gray-500">Bibliothèque de fiches techniques ({fiches.length} recettes)</span>
-                <button
-                  onClick={handleCreateFiche}
-                  className="flex items-center gap-1 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-xl text-xs font-bold shadow-sm"
-                >
-                  <Plus className="w-4 h-4" />
-                  Créer une Fiche Technique
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold border border-slate-200 transition-all cursor-pointer shadow-xs"
+                    title="Imprimer le catalogue des fiches techniques"
+                  >
+                    <Printer className="w-4 h-4 text-slate-600" />
+                    Imprimer les Fiches
+                  </button>
+                  <button
+                    onClick={handleCreateFiche}
+                    className="flex items-center gap-1 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-xl text-xs font-bold shadow-sm"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Créer une Fiche Technique
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -2262,6 +2623,15 @@ export default function AdvancedMenuPlanner() {
           }} 
         />
       )}
+
+      {/* DRAWER STOCK À L'INSTANTANÉ */}
+      <InstantStockDrawer
+        isOpen={isInstantStockOpen}
+        onClose={() => setIsInstantStockOpen(false)}
+        requiredItems={getDayIngredients(weeklyPlan[activeDay])}
+        activeDay={activeDay}
+        convives={weeklyPlan[activeDay]?.convives || 100}
+      />
 
     </div>
   );

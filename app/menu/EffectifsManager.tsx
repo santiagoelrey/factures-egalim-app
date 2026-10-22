@@ -3,7 +3,7 @@
 import { useState, useRef } from 'react';
 import { 
   Users, Upload, Download, FileSpreadsheet, Trash2, Plus, 
-  CheckCircle2, AlertCircle, Calendar, Sparkles, Search, Edit2
+  CheckCircle2, AlertCircle, Calendar, Sparkles, Search, Edit2, Printer
 } from 'lucide-react';
 import { 
   DailyHeadcount, getHeadcounts, saveHeadcounts, 
@@ -236,6 +236,15 @@ export default function EffectifsManager({ onHeadcountsUpdated }: EffectifsManag
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-4 py-2 bg-white/20 hover:bg-white/30 backdrop-blur-md border border-white/25 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shadow-xs"
+              title="Imprimer le tableau des effectifs datés"
+            >
+              <Printer className="w-4 h-4" />
+              Imprimer le Calendrier
+            </button>
             <button
               onClick={downloadSampleCSV}
               className="px-4 py-2 bg-white/15 hover:bg-white/25 backdrop-blur-md border border-white/20 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer"

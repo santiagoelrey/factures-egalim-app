@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { 
   BarChart3, Calendar, TrendingUp, Info, HelpCircle, 
-  Trash2, RefreshCw, ChevronRight, Award, CheckCircle, ShieldAlert, Loader2, FileText, X 
+  Trash2, RefreshCw, ChevronRight, Award, CheckCircle, ShieldAlert, Loader2, FileText, X, Printer 
 } from 'lucide-react';
 
 interface HistoricalLine {
@@ -186,6 +186,16 @@ export default function ReportingPage() {
           >
             {reportGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
             <span className="hidden sm:inline">Rapport Officiel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-black text-white rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer"
+            title="Imprimer le Bilan EGALIM complet"
+          >
+            <Printer className="w-4 h-4 text-orange-400" />
+            <span className="hidden sm:inline">Imprimer le Bilan</span>
           </button>
           
           <button

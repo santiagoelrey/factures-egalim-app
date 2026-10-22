@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Package, Search, Minus, Plus, Trash2, ArrowDownCircle } from 'lucide-react';
+import { Package, Search, Minus, Plus, Trash2, ArrowDownCircle, Printer } from 'lucide-react';
 import { StockItem } from '../lib/types';
 import { updateStockQuantity, saveStock } from '../lib/stock-utils';
 // We would ideally import useStock here but since this is client component in Next app folder structure,
@@ -86,9 +86,20 @@ export default function StockPage() {
                     <p className="text-gray-500">Suivez vos stocks et déduisez les consommations</p>
                 </div>
 
-                <div className="bg-white px-4 py-2 rounded-lg shadow-sm border border-gray-200">
-                    <span className="text-sm text-gray-500">Valeur totale du stock</span>
-                    <div className="text-2xl font-bold text-gray-900">{totalValue.toFixed(2)} €</div>
+                <div className="flex flex-wrap items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={() => window.print()}
+                        className="flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-black text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer print:hidden"
+                        title="Imprimer l'inventaire complet des stocks"
+                    >
+                        <Printer className="w-4 h-4 text-orange-400" />
+                        Imprimer l'Inventaire
+                    </button>
+                    <div className="bg-white px-4 py-2 rounded-lg shadow-sm border border-gray-200">
+                        <span className="text-sm text-gray-500">Valeur totale du stock</span>
+                        <div className="text-2xl font-bold text-gray-900">{totalValue.toFixed(2)} €</div>
+                    </div>
                 </div>
             </div>
 
