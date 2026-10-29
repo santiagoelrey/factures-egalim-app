@@ -19,15 +19,28 @@ export default function StockPage() {
         const stored = localStorage.getItem('egalim_stock_v1');
         if (stored) {
             try {
-                setStock(JSON.parse(stored));
+                const parsed = JSON.parse(stored);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    setStock(parsed);
+                    setLoading(false);
+                    return;
+                }
             } catch (e) {
                 console.error("Error loading stock", e);
             }
         }
-        setLoading(false);
+        // Si le stock local est vide (ex: premier chargement sur téléphone),
+        // on tente une récupération automatique depuis Google Sheets
+        import('../lib/sync-engine').then(({ syncData }) => {
+            syncData('stock').then(res => {
+                if (res.direction === 'pulled' && res.data) {
+                    setStock(res.data);
+                }
+            }).catch(() => {}).finally(() => setLoading(false));
+        }).catch(() => setLoading(false));
     }, []);
 
-    // Sync stock across tabs/pages when storage changes or page gains focus
+    // Sync stock across tabs/pages when storage changes, page gains focus, or cloud sync completes
     useEffect(() => {
         const handleSync = () => {
             const stored = localStorage.getItem('egalim_stock_v1');
@@ -42,10 +55,12 @@ export default function StockPage() {
 
         window.addEventListener('storage', handleSync);
         window.addEventListener('focus', handleSync);
+        window.addEventListener('egalim_sync_completed', handleSync);
 
         return () => {
             window.removeEventListener('storage', handleSync);
             window.removeEventListener('focus', handleSync);
+            window.removeEventListener('egalim_sync_completed', handleSync);
         };
     }, []);
 
@@ -117,106 +132,213 @@ export default function StockPage() {
                 />
             </div>
 
-            {/* Table */}
+            {/* Table / Cards Container */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left">
-                        <thead className="bg-gray-50 text-gray-600 uppercase font-medium">
-                            <tr>
-                                <th className="px-6 py-4">Produit</th>
-                                <th className="px-6 py-4 text-center">Type</th>
-                                <th className="px-6 py-4 text-right">Prix U.</th>
-                                <th className="px-6 py-4 text-center">Quantité (Stock)</th>
-                                <th className="px-6 py-4 text-right">Valeur</th>
-                                <th className="px-6 py-4 text-center">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100">
-                            {filteredStock.length === 0 ? (
+                {/* Desktop Table View */}
+                <div className="hidden md:block">
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-gray-50 text-gray-600 uppercase font-medium">
                                 <tr>
-                                    <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
-                                        Aucun produit dans le stock pour le moment.
-                                        <br />
-                                        <span className="text-sm text-gray-400">Ajoutez des factures pour remplir votre stock.</span>
-                                    </td>
+                                    <th className="px-6 py-4">Produit</th>
+                                    <th className="px-6 py-4 text-center">Type</th>
+                                    <th className="px-6 py-4 text-right">Prix U.</th>
+                                    <th className="px-6 py-4 text-center">Quantité (Stock)</th>
+                                    <th className="px-6 py-4 text-right">Valeur</th>
+                                    <th className="px-6 py-4 text-center">Actions</th>
                                 </tr>
-                            ) : (
-                                filteredStock.map((item) => (
-                                    <tr key={item.id} className="hover:bg-blue-50/30 transition-colors group">
-                                        <td className="px-6 py-4 font-medium text-gray-900">
-                                            {item.produit.replace('[BIO] ', '')}
-                                            {item.quantite < 1 && <span className="ml-2 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs">Épuisé</span>}
-                                        </td>
-                                        <td className="px-6 py-4 text-center">
-                                            {item.est_bio ? (
-                                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                                    BIO
-                                                </span>
-                                            ) : (
-                                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                                                    Standard
-                                                </span>
-                                            )}
-                                        </td>
-                                        <td className="px-6 py-4 text-right text-gray-600">
-                                            <input
-                                                type="number"
-                                                step="0.0001"
-                                                value={item.prix_unitaire}
-                                                onChange={(e) => {
-                                                    const price = parseFloat(e.target.value) || 0;
-                                                    setStock(prev => prev.map(si => si.id === item.id ? { ...si, prix_unitaire: price } : si));
-                                                }}
-                                                className="w-20 text-right bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
-                                            /> €
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center justify-center gap-3">
-                                                <button
-                                                    onClick={() => updateQuantity(item.id, -1)}
-                                                    className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all active:scale-95 shadow-sm"
-                                                    title="Consommer 1 unité"
-                                                >
-                                                    <Minus className="w-4 h-4" />
-                                                </button>
-
-                                                <input
-                                                    type="number"
-                                                    step="0.01"
-                                                    value={item.quantite}
-                                                    onChange={(e) => {
-                                                        const qty = parseFloat(e.target.value) || 0;
-                                                        setStock(prev => prev.map(si => si.id === item.id ? { ...si, quantite: qty } : si));
-                                                    }}
-                                                    className="w-16 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
-                                                />
-
-                                                <button
-                                                    onClick={() => updateQuantity(item.id, 1)}
-                                                    className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-green-50 hover:border-green-200 hover:text-green-600 transition-all active:scale-95 shadow-sm"
-                                                    title="Ajouter 1 unité"
-                                                >
-                                                    <Plus className="w-4 h-4" />
-                                                </button>
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4 text-right font-medium text-gray-900">
-                                            {(item.quantite * item.prix_unitaire).toFixed(2)} €
-                                        </td>
-                                        <td className="px-6 py-4 text-center">
-                                            <button
-                                                onClick={() => removeItem(item.id)}
-                                                className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                                title="Supprimer la ligne"
-                                            >
-                                                <Trash2 className="w-4 h-4" />
-                                            </button>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {filteredStock.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                                            Aucun produit dans le stock pour le moment.
+                                            <br />
+                                            <span className="text-sm text-gray-400">Ajoutez des factures pour remplir votre stock.</span>
                                         </td>
                                     </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
+                                ) : (
+                                    filteredStock.map((item) => (
+                                        <tr key={item.id} className="hover:bg-blue-50/30 transition-colors group">
+                                            <td className="px-6 py-4 font-medium text-gray-900">
+                                                {item.produit.replace('[BIO] ', '')}
+                                                {item.quantite < 1 && <span className="ml-2 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs">Épuisé</span>}
+                                            </td>
+                                            <td className="px-6 py-4 text-center">
+                                                {item.est_bio ? (
+                                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                                        BIO
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                                        Standard
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="px-6 py-4 text-right text-gray-600">
+                                                <input
+                                                    type="number"
+                                                    step="0.0001"
+                                                    value={item.prix_unitaire}
+                                                    onChange={(e) => {
+                                                        const price = parseFloat(e.target.value) || 0;
+                                                        setStock(prev => prev.map(si => si.id === item.id ? { ...si, prix_unitaire: price } : si));
+                                                    }}
+                                                    className="w-20 text-right bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
+                                                /> €
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center justify-center gap-3">
+                                                    <button
+                                                        onClick={() => updateQuantity(item.id, -1)}
+                                                        className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all active:scale-95 shadow-sm"
+                                                        title="Consommer 1 unité"
+                                                    >
+                                                        <Minus className="w-4 h-4" />
+                                                    </button>
+
+                                                    <input
+                                                        type="number"
+                                                        step="0.01"
+                                                        value={item.quantite}
+                                                        onChange={(e) => {
+                                                            const qty = parseFloat(e.target.value) || 0;
+                                                            setStock(prev => prev.map(si => si.id === item.id ? { ...si, quantite: qty } : si));
+                                                        }}
+                                                        className="w-16 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
+                                                    />
+
+                                                    <button
+                                                        onClick={() => updateQuantity(item.id, 1)}
+                                                        className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-green-50 hover:border-green-200 hover:text-green-600 transition-all active:scale-95 shadow-sm"
+                                                        title="Ajouter 1 unité"
+                                                    >
+                                                        <Plus className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 text-right font-medium text-gray-900">
+                                                {(item.quantite * item.prix_unitaire).toFixed(2)} €
+                                            </td>
+                                            <td className="px-6 py-4 text-center">
+                                                <button
+                                                    onClick={() => removeItem(item.id)}
+                                                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                                    title="Supprimer la ligne"
+                                                >
+                                                    <Trash2 className="w-4 h-4" />
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {/* Mobile Card View */}
+                <div className="block md:hidden divide-y divide-gray-100">
+                    {filteredStock.length === 0 ? (
+                        <div className="px-6 py-12 text-center text-gray-500">
+                            Aucun produit dans le stock pour le moment.
+                            <br />
+                            <span className="text-sm text-gray-400">Ajoutez des factures pour remplir votre stock.</span>
+                        </div>
+                    ) : (
+                        filteredStock.map((item) => (
+                            <div key={item.id} className="p-4 space-y-3">
+                                {/* Header: Product Name + Badges + Delete */}
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="font-semibold text-gray-900 text-base break-words">
+                                            {item.produit.replace('[BIO] ', '')}
+                                        </div>
+                                        {item.quantite < 1 && (
+                                            <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">
+                                                Épuisé
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        {item.est_bio ? (
+                                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                                BIO
+                                            </span>
+                                        ) : (
+                                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                                Standard
+                                            </span>
+                                        )}
+                                        <button
+                                            onClick={() => removeItem(item.id)}
+                                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                            title="Supprimer la ligne"
+                                        >
+                                            <Trash2 className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Price and Value row */}
+                                <div className="flex items-center justify-between text-sm">
+                                    <div className="flex items-center gap-1.5 text-gray-600">
+                                        <span className="text-xs text-gray-400 font-medium">Prix U. :</span>
+                                        <input
+                                            type="number"
+                                            step="0.0001"
+                                            value={item.prix_unitaire}
+                                            onChange={(e) => {
+                                                const price = parseFloat(e.target.value) || 0;
+                                                setStock(prev => prev.map(si => si.id === item.id ? { ...si, prix_unitaire: price } : si));
+                                            }}
+                                            className="w-20 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none font-medium text-gray-800"
+                                        />
+                                        <span>€</span>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className="text-xs text-gray-400 font-medium">Valeur : </span>
+                                        <span className="font-bold text-gray-900 text-base">
+                                            {(item.quantite * item.prix_unitaire).toFixed(2)} €
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {/* Quantity controls row */}
+                                <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                                    <span className="text-xs font-medium text-gray-500">Quantité en stock</span>
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            onClick={() => updateQuantity(item.id, -1)}
+                                            className="w-9 h-9 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-red-50 hover:border-red-200 hover:text-red-600 active:scale-95 shadow-sm transition-all"
+                                            title="Consommer 1 unité"
+                                        >
+                                            <Minus className="w-4 h-4" />
+                                        </button>
+
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={item.quantite}
+                                            onChange={(e) => {
+                                                const qty = parseFloat(e.target.value) || 0;
+                                                setStock(prev => prev.map(si => si.id === item.id ? { ...si, quantite: qty } : si));
+                                            }}
+                                            className="w-16 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none text-gray-900"
+                                        />
+
+                                        <button
+                                            onClick={() => updateQuantity(item.id, 1)}
+                                            className="w-9 h-9 rounded-full border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-green-50 hover:border-green-200 hover:text-green-600 active:scale-95 shadow-sm transition-all"
+                                            title="Ajouter 1 unité"
+                                        >
+                                            <Plus className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))
+                    )}
                 </div>
             </div>
         </div>

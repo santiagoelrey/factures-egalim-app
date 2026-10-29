@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Settings, Save, CheckCircle2, Building2, User, Percent, Table } from 'lucide-react';
+import { markLocalModified } from '../lib/sync-engine';
 
 interface AppSettings {
     etablissement: string;
@@ -24,15 +25,38 @@ export default function SettingsPage() {
     const [saveSuccess, setSaveSuccess] = useState(false);
 
     useEffect(() => {
-        const stored = localStorage.getItem('egalim_settings_v1');
-        if (stored) {
-            try {
-                setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(stored) });
-            } catch (e) {
-                console.error("Error loading settings", e);
+        const loadSettings = () => {
+            const stored = localStorage.getItem('egalim_settings_v1');
+            if (stored) {
+                try {
+                    setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(stored) });
+                    setLoading(false);
+                    return;
+                } catch (e) {
+                    console.error("Error loading settings", e);
+                }
             }
-        }
-        setLoading(false);
+            // Si pas de paramètres locaux, tenter de récupérer depuis Google Sheets
+            import('../lib/sync-engine').then(({ syncData }) => {
+                syncData('settings').then(res => {
+                    if (res.direction === 'pulled' && res.data) {
+                        setSettings({ ...DEFAULT_SETTINGS, ...res.data });
+                    }
+                }).catch(() => {}).finally(() => setLoading(false));
+            }).catch(() => setLoading(false));
+        };
+
+        loadSettings();
+
+        window.addEventListener('storage', loadSettings);
+        window.addEventListener('focus', loadSettings);
+        window.addEventListener('egalim_sync_completed', loadSettings);
+
+        return () => {
+            window.removeEventListener('storage', loadSettings);
+            window.removeEventListener('focus', loadSettings);
+            window.removeEventListener('egalim_sync_completed', loadSettings);
+        };
     }, []);
 
     const handleChange = (key: keyof AppSettings, value: any) => {
@@ -46,6 +70,7 @@ export default function SettingsPage() {
         setIsSaving(true);
         try {
             localStorage.setItem('egalim_settings_v1', JSON.stringify(settings));
+            markLocalModified('settings');
             setSaveSuccess(true);
             setTimeout(() => setSaveSuccess(false), 3000);
         } catch (e) {

@@ -5,6 +5,7 @@ import {
   BarChart3, Calendar, TrendingUp, Info, HelpCircle, 
   Trash2, RefreshCw, ChevronRight, Award, CheckCircle, ShieldAlert, Loader2, FileText, X, Printer 
 } from 'lucide-react';
+import { markLocalModified } from '../lib/sync-engine';
 
 interface HistoricalLine {
   produit: string;
@@ -40,6 +41,20 @@ export default function ReportingPage() {
 
   useEffect(() => {
     loadHistory();
+
+    const handleSync = () => {
+      loadHistory();
+    };
+
+    window.addEventListener('storage', handleSync);
+    window.addEventListener('focus', handleSync);
+    window.addEventListener('egalim_sync_completed', handleSync);
+
+    return () => {
+      window.removeEventListener('storage', handleSync);
+      window.removeEventListener('focus', handleSync);
+      window.removeEventListener('egalim_sync_completed', handleSync);
+    };
   }, []);
 
   const loadHistory = () => {
@@ -47,17 +62,31 @@ export default function ReportingPage() {
     const stored = localStorage.getItem('egalim_invoice_history_v1');
     if (stored) {
       try {
-        setHistory(JSON.parse(stored));
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setHistory(parsed);
+          setLoading(false);
+          return;
+        }
       } catch (e) {
         console.error("Error loading invoice history", e);
       }
     }
-    setLoading(false);
+
+    // Si l'historique est vide localement, tentative de récupération depuis Google Sheets
+    import('../lib/sync-engine').then(({ syncData }) => {
+      syncData('invoice_history').then(res => {
+        if (res.direction === 'pulled' && res.data) {
+          setHistory(res.data);
+        }
+      }).catch(() => {}).finally(() => setLoading(false));
+    }).catch(() => setLoading(false));
   };
 
   const handleClearHistory = () => {
     if (confirm("Êtes-vous sûr de vouloir réinitialiser tout l'historique d'achats ? Cette action effacera les données de reporting mais ne supprimera pas vos stocks.")) {
       localStorage.removeItem('egalim_invoice_history_v1');
+      markLocalModified('invoice_history');
       setHistory([]);
     }
   };
@@ -160,7 +189,7 @@ export default function ReportingPage() {
           </p>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Time Filter Tabs */}
           <div className="bg-white border border-gray-200 rounded-xl p-1 flex shadow-sm">
             {(['ALL', 'YEAR', 'MONTH'] as const).map(f => (
@@ -300,7 +329,7 @@ export default function ReportingPage() {
           </div>
 
           {/* Core Stats Overview */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
             <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm">
               <span className="text-xs text-gray-400 font-bold uppercase block mb-1">Total Achats (HT)</span>
               <span className="text-2xl font-bold text-gray-900">{totalPurchases.toFixed(2)} €</span>
@@ -323,45 +352,88 @@ export default function ReportingPage() {
                 Répartition Détaillée par Label
               </h3>
               
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold tracking-wider">
-                    <tr>
-                      <th className="px-4 py-3">Label</th>
-                      <th className="px-4 py-3 text-right">Montant HT</th>
-                      <th className="px-4 py-3 text-right">Pourcentage d'achats</th>
-                      <th className="px-4 py-3 text-center">Type EGALIM</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {Object.entries(LABELS_CONFIG).map(([key, config]) => {
-                      const data = labelBreakdown[key] || { cost: 0, percent: 0 };
-                      if (data.cost === 0) return null; // Hide labels with no purchases to keep it clean
-                      return (
-                        <tr key={key} className="hover:bg-gray-50/50 transition-colors">
-                          <td className="px-4 py-3 font-medium">
-                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${config.color}`}>
-                              {config.label}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-700 font-semibold">
-                            {data.cost.toFixed(2)} €
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-900 font-bold">
-                            {data.percent.toFixed(1)}%
-                          </td>
-                          <td className="px-4 py-3 text-center">
-                            {config.isEgalim ? (
-                              <span className="inline-block w-2.5 h-2.5 rounded-full bg-blue-500" title="Éligible EGALIM" />
-                            ) : (
-                              <span className="inline-block w-2.5 h-2.5 rounded-full bg-gray-200" title="Non éligible" />
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              {/* Desktop Table View */}
+              <div className="hidden md:block">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                    <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold tracking-wider">
+                      <tr>
+                        <th className="px-4 py-3">Label</th>
+                        <th className="px-4 py-3 text-right">Montant HT</th>
+                        <th className="px-4 py-3 text-right">Pourcentage d'achats</th>
+                        <th className="px-4 py-3 text-center">Type EGALIM</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {Object.entries(LABELS_CONFIG).map(([key, config]) => {
+                        const data = labelBreakdown[key] || { cost: 0, percent: 0 };
+                        if (data.cost === 0) return null; // Hide labels with no purchases to keep it clean
+                        return (
+                          <tr key={key} className="hover:bg-gray-50/50 transition-colors">
+                            <td className="px-4 py-3 font-medium">
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${config.color}`}>
+                                {config.label}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-700 font-semibold">
+                              {data.cost.toFixed(2)} €
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-900 font-bold">
+                              {data.percent.toFixed(1)}%
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {config.isEgalim ? (
+                                <span className="inline-block w-2.5 h-2.5 rounded-full bg-blue-500" title="Éligible EGALIM" />
+                              ) : (
+                                <span className="inline-block w-2.5 h-2.5 rounded-full bg-gray-200" title="Non éligible" />
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="block md:hidden space-y-2.5">
+                {Object.entries(LABELS_CONFIG).map(([key, config]) => {
+                  const data = labelBreakdown[key] || { cost: 0, percent: 0 };
+                  if (data.cost === 0) return null;
+                  return (
+                    <div key={key} className="p-3 bg-gray-50/60 rounded-xl border border-gray-100 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${config.color}`}>
+                          {config.label}
+                        </span>
+                        <div className="flex items-center gap-1.5 text-xs font-medium">
+                          {config.isEgalim ? (
+                            <>
+                              <span className="inline-block w-2 h-2 rounded-full bg-blue-500" />
+                              <span className="text-blue-700 font-semibold text-[11px]">Éligible EGALIM</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="inline-block w-2 h-2 rounded-full bg-gray-300" />
+                              <span className="text-gray-400 text-[11px]">Non éligible</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between text-sm pt-1 border-t border-gray-100">
+                        <div>
+                          <span className="text-[11px] text-gray-400 font-medium">Montant : </span>
+                          <span className="font-semibold text-gray-700">{data.cost.toFixed(2)} €</span>
+                        </div>
+                        <div>
+                          <span className="text-[11px] text-gray-400 font-medium">Part : </span>
+                          <span className="font-bold text-gray-900">{data.percent.toFixed(1)}%</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -397,59 +469,110 @@ export default function ReportingPage() {
               Historique des lignes d'achats comptabilisées (Les 15 derniers articles)
             </h3>
             
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold tracking-wider">
-                  <tr>
-                    <th className="px-4 py-3">Date Scan</th>
-                    <th className="px-4 py-3">Produit</th>
-                    <th className="px-4 py-3 text-right">Qté</th>
-                    <th className="px-4 py-3 text-right">Prix U. HT</th>
-                    <th className="px-4 py-3 text-right">Total HT</th>
-                    <th className="px-4 py-3 text-center">Label Qualité</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredHistory
-                    .slice(-15)
-                    .reverse()
-                    .map((item, index) => {
-                      const labelKey = (item.label || (item.est_bio ? 'BIO' : 'STANDARD')) as keyof typeof LABELS_CONFIG;
-                      const labelInfo = LABELS_CONFIG[labelKey] || LABELS_CONFIG.STANDARD;
-                      
-                      return (
-                        <tr key={index} className="hover:bg-gray-50/50 transition-colors">
-                          <td className="px-4 py-3 text-xs text-gray-400 font-mono">
-                            {new Date(item.date_scan).toLocaleDateString('fr-FR', {
-                              day: '2-digit',
-                              month: '2-digit',
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit'
-                            })}
-                          </td>
-                          <td className="px-4 py-3 font-semibold text-gray-800">
-                            {item.produit.replace('[BIO] ', '')}
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600 font-medium">
-                            {item.quantite}
-                          </td>
-                          <td className="px-4 py-3 text-right text-gray-600">
-                            {item.prix_unitaire.toFixed(4)} €
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-gray-900">
-                            {(item.total_ht || (item.quantite * item.prix_unitaire)).toFixed(2)} €
-                          </td>
-                          <td className="px-4 py-3 text-center">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${labelInfo.color}`}>
-                              {labelInfo.label.split(' ')[0]}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
+            {/* Desktop Table View */}
+            <div className="hidden md:block">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">Date Scan</th>
+                      <th className="px-4 py-3">Produit</th>
+                      <th className="px-4 py-3 text-right">Qté</th>
+                      <th className="px-4 py-3 text-right">Prix U. HT</th>
+                      <th className="px-4 py-3 text-right">Total HT</th>
+                      <th className="px-4 py-3 text-center">Label Qualité</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filteredHistory
+                      .slice(-15)
+                      .reverse()
+                      .map((item, index) => {
+                        const labelKey = (item.label || (item.est_bio ? 'BIO' : 'STANDARD')) as keyof typeof LABELS_CONFIG;
+                        const labelInfo = LABELS_CONFIG[labelKey] || LABELS_CONFIG.STANDARD;
+                        
+                        return (
+                          <tr key={index} className="hover:bg-gray-50/50 transition-colors">
+                            <td className="px-4 py-3 text-xs text-gray-400 font-mono">
+                              {new Date(item.date_scan).toLocaleDateString('fr-FR', {
+                                day: '2-digit',
+                                month: '2-digit',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })}
+                            </td>
+                            <td className="px-4 py-3 font-semibold text-gray-800">
+                              {item.produit.replace('[BIO] ', '')}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-600 font-medium">
+                              {item.quantite}
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-600">
+                              {item.prix_unitaire.toFixed(4)} €
+                            </td>
+                            <td className="px-4 py-3 text-right font-semibold text-gray-900">
+                              {(item.total_ht || (item.quantite * item.prix_unitaire)).toFixed(2)} €
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${labelInfo.color}`}>
+                                {labelInfo.label.split(' ')[0]}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Mobile Card View */}
+            <div className="block md:hidden space-y-3">
+              {filteredHistory
+                .slice(-15)
+                .reverse()
+                .map((item, index) => {
+                  const labelKey = (item.label || (item.est_bio ? 'BIO' : 'STANDARD')) as keyof typeof LABELS_CONFIG;
+                  const labelInfo = LABELS_CONFIG[labelKey] || LABELS_CONFIG.STANDARD;
+
+                  return (
+                    <div key={index} className="p-3.5 bg-gray-50/60 rounded-xl border border-gray-100 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-semibold text-gray-900 text-sm">
+                          {item.produit.replace('[BIO] ', '')}
+                        </div>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border shrink-0 ${labelInfo.color}`}>
+                          {labelInfo.label.split(' ')[0]}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs text-gray-500 font-mono">
+                        <span>
+                          {new Date(item.date_scan).toLocaleDateString('fr-FR', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </span>
+                        <span className="font-sans font-medium text-gray-600">
+                          Qté : {item.quantite}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs pt-1.5 border-t border-gray-100">
+                        <span className="text-gray-500">
+                          P.U. : {item.prix_unitaire.toFixed(4)} €
+                        </span>
+                        <span className="font-bold text-gray-900 text-sm">
+                          Total : {(item.total_ht || (item.quantite * item.prix_unitaire)).toFixed(2)} €
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
           </div>
         </>

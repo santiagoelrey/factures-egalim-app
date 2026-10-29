@@ -5,6 +5,7 @@ import { Upload, FileUp, Check, Loader2, Save, Package, Download, Plus, Trash2 }
 import { DayData, InvoiceLine } from './lib/types';
 import { addLinesToStock } from './lib/stock-utils';
 import { exportToCSV } from './lib/csv-utils';
+import { markLocalModified } from './lib/sync-engine';
 
 export default function Home() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -64,6 +65,7 @@ export default function Home() {
     }));
 
     localStorage.setItem('egalim_invoice_history_v1', JSON.stringify([...history, ...datedLines]));
+    markLocalModified('invoice_history');
 
     alert(`${addedCount} lignes ajoutées au stock avec succès !`);
   };

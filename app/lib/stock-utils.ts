@@ -1,4 +1,5 @@
 import { StockItem, InvoiceLine } from './types';
+import { markLocalModified } from './sync-engine';
 
 const STOCK_KEY = 'egalim_stock_v1';
 
@@ -17,6 +18,7 @@ export const getStock = (): StockItem[] => {
 export const saveStock = (stock: StockItem[]) => {
     if (typeof window === 'undefined') return;
     localStorage.setItem(STOCK_KEY, JSON.stringify(stock));
+    markLocalModified('stock');
 };
 
 export const generateStockId = (produit: string, estBio: boolean) => {

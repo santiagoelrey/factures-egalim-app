@@ -11,6 +11,7 @@ export interface DailyHeadcount {
 }
 
 const STORAGE_KEY = 'egalim_effectifs_db_v1';
+import { markLocalModified } from './sync-engine';
 
 // Normalisation des dates (ex: "22/10/2026", "22-10-2026", "2026-10-22" -> "2026-10-22")
 export function normalizeDate(input: string | number | Date): string | null {
@@ -115,6 +116,7 @@ export function saveHeadcounts(list: DailyHeadcount[]): void {
     });
     const uniqueList = Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(uniqueList));
+    markLocalModified('effectifs');
   } catch (e) {
     console.error('Erreur sauvegarde effectifs:', e);
   }
