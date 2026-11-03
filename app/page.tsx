@@ -88,8 +88,8 @@ export default function Home() {
           const canvas = document.createElement('canvas');
           let width = img.width;
           let height = img.height;
-          const MAX_WIDTH = 1920;
-          const MAX_HEIGHT = 1920;
+          const MAX_WIDTH = 2560;
+          const MAX_HEIGHT = 2560;
           if (width > height) {
             if (width > MAX_WIDTH) {
               height *= MAX_WIDTH / width;
@@ -105,7 +105,7 @@ export default function Home() {
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           ctx?.drawImage(img, 0, 0, width, height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
           resolve(dataUrl);
         };
         img.onerror = (error) => reject(error);
