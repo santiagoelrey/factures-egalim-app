@@ -3,69 +3,76 @@ export const maxDuration = 60;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const PROMPT = `
-Tu es un expert comptable et gestionnaire de cuisine centrale spécialisé dans l'extraction de factures et bons de livraison (BL) de restauration collective française (loi EGALIM).
+Tu es un expert comptable et gestionnaire de cuisine centrale spécialisé dans l'extraction de factures et bons de livraison (BL) de fournisseurs de restauration collective française (ex: EpiSaveurs - Groupe Pomona, Transgourmet, Sysco, Brake, Metro, etc.).
 
-Analyse minutieusement cette image de facture ou de bon de livraison.
+Analyse l'image du document fourni (bordereau de livraison ou facture).
 
-### RÈGLES D'EXTRACTION CRITIQUES :
+### RÈGLES D'EXTRACTION IMPÉRATIVES :
 
-1. **IDENTIFICATION BIO & LABELS DE QUALITÉ (EGALIM)** : 
-   - Détecte activement les mentions et sigles de qualité : "BIO", "AB", "Agriculture Biologique", "LABEL ROUGE", "HVE" (Haute Valeur Environnementale), "IGP", "STG", "AOP", "AOC", "FERMIER", "PECHE DURABLE" / "MSC".
-   - Si le produit est BIO :
-     * "est_bio": true
-     * "label": "BIO"
-     * Ajoute impérativement le préfixe "[BIO] " au tout début du nom du produit (ex: "[BIO] Carottes vrac").
-   - Si le produit a un autre label :
-     * "est_bio": false
-     * "label": renseigne le code exact : "AOP", "IGP", "LABEL_ROUGE", "HVE", "STG", "AOG", "FERMIER", "PECHE_DURABLE".
-   - Si aucun label officiel n'apparaît :
-     * "est_bio": false
-     * "label": "STANDARD".
+1. **FIDÉLITÉ ABSOLUE AUX LIBELLÉS IMPRIMÉS** :
+   - Recopie EXACTEMENT le libellé commercial imprimé dans la colonne "Désignation" / "Article" (ex: "Macaroni QS sac 5KG Panzani", "Riz lg basmati sac 5KG VPaille", "Curry rge EDC sac 500Gx10 Terre Exo").
+   - N'invente JAMAIS un nom de produit différent (ne remplace PAS "Macaroni" par "Moutarde", ni "Couscous" par "Compote", ni "Terre Exo" par "Toqueuila").
+   - Conserve les marques réelles (Panzani, Lustucru, Terre Exotique, Toquella, etc.) et le conditionnement ("sac 5KG", "bid 5Lx3", etc.).
 
-2. **STRUCTURE TEMPORELLE ET DATES** :
-   - Cherche en priorité la date de livraison, la date du bon ou les jours de livraison (ex: "Lundi 03/11", "Mercredi 05 Novembre").
-   - Si plusieurs dates/jours apparaissent pour différents groupes de produits, sépare-les en objets distincts dans le tableau "data".
-   - Si une seule date globale figure sur le document, utilise cette date (ex: "Bon de livraison du 03/11/2026").
-   - À défaut absolu, utilise "Livraison".
+2. **DÉTECTION DES LABELS DE QUALITÉ (EGALIM)** :
+   - Analyse méticuleusement chaque mot du libellé pour repérer les labels officiels :
+     * "BIO" / "Bio" / "AB" : mets "est_bio": true et "label": "BIO". Ajoute le préfixe "[BIO] " au tout début du nom (ex: "[BIO] Couscous moyen Bio sac 5KG Panz").
+     * "HVE" (Haute Valeur Environnementale) : "est_bio": false, "label": "HVE". (ex: "Torsade QS HVE sac 5KG Lustucru" -> label: "HVE").
+     * "IGP" : "est_bio": false, "label": "IGP".
+     * Si un produit est à la fois BIO et IGP (ex: "Riz lg etuve Camarg IGP Bio sac5KG Heriz") : donne la priorité à "BIO" ("est_bio": true, "label": "BIO", nom: "[BIO] Riz lg etuve Camarg IGP Bio sac5KG Heriz").
+     * "AOP", "AOC", "LABEL_ROUGE", "STG", "FERMIER", "PECHE_DURABLE".
+     * Sinon : "est_bio": false, "label": "STANDARD".
+   - Note : "QS" signifie "Qualité Supérieure" chez les grossistes de pâtes, ce n'est pas un label officiel EGALIM, sauf s'il est accompagné de HVE ou Label Rouge.
 
-3. **PRÉCISION DES QUANTITÉS ET DISTINCTION DES COLONNES** :
-   - **QUANTITÉ LIVRÉE** : Sur les bons de livraison, il y a souvent "Quantité commandée" et "Quantité livrée / facturée". Prends TOUJOURS la **quantité réellement livrée/facturée**.
-   - Si une unité est indiquée (ex: 5.500 kg, 12 btes, 3 colis de 5kg), extrait le poids ou volume net facturé (ex: 15 si 3 colis de 5kg facturés au kg, ou le nombre total d'unités). Le champ "quantite" doit être un NOMBRE positif.
-   - Ignore les codes articles ou numéros de lot dans la quantité.
+3. **COLONNES NUMÉRIQUES ET FORMAT GROSSISTE** :
+   Les bordereaux EpiSaveurs / Pomona comportent souvent :
+   \`Ligne/Article | Désignation | Qté livrée | Qté fact. UF | PU | TVA | MT HT\`
+   - **QUANTITÉ** : Extrait le nombre de la colonne "Qté livrée" ou "Qté fact. UF" (ex: "14,000 COL" ou "14,000 SAC" -> 14 ; "2,000 BID" -> 2 ; "3,000 COL" -> 3).
+     * En France la virgule est le séparateur décimal ("14,000" = 14 unités, "2,000" = 2 unités). Ne confonds PAS "14,000" avec quatorze mille !
+   - **PRIX UNITAIRE (PU)** : Recopie fidèlement le chiffre imprimé dans la colonne "PU" (ex: "20,687" -> 20.687 ; "8,632" -> 8.632 ; "13,572" -> 13.572 ; "20,282" -> 20.282).
+   - **MONTANT TOTAL HT (MT HT) - RÈGLE FONDAMENTALE** :
+     * Recopie STRICTEMENT le montant imprimé dans la colonne "MT HT" (ex: 289.62, 120.85, 40.72, 283.95, 245.66).
+     * N'INVENTE PAS de faux totaux et ne divise pas les prix.
+     * Si PU = 20.687 et Qté = 14, MT HT = 289.62 € (14 x 20.687).
+   - **TVA** : Si un code TVA comme "E 1" ou "5,50 %" est présent, calcule ou extrait la TVA correspondante. Si 5.5% : TVA = MT HT x 0.055.
+   - **TTC** : MT HT + TVA.
 
-4. **PRIX UNITAIRE ET TOTAUX (COHÉRENCE ARITHMÉTIQUE OBLIGATOIRE)** :
-   - **PRIX UNITAIRE HT** : Conserve toutes les décimales imprimées (ex: 1.4850 €/kg).
-   - **TOTAL HT** : Lis en priorité le montant total de la ligne imprimé sur le document.
-     * Vérifie la cohérence : Total HT doit être très proche de Quantité × Prix Unitaire.
-     * Si le prix unitaire est manquant mais que le Total HT et la Quantité sont présents : déduis Prix Unitaire = Total HT / Quantité.
-     * Si le Total HT est manquant : calcule Quantité × Prix Unitaire.
-     * Si aucun prix ne figure sur le BL (certains BL n'ont que des quantités) : indique 0 pour le prix unitaire et total HT, l'utilisateur pourra le compléter.
-   - **TVA** : Si le taux de TVA figure sur la ligne (5.5%, 10%, 20%), calcule le montant de TVA correspondant. Sinon, applique 5.5% (0.055) par défaut pour les produits alimentaires.
-   - **TTC** : Total HT + TVA.
+4. **CONTRÔLE DE TOTALISATION DU DOCUMENT (VÉRIFICATION D'EXHAUSTIVITÉ)** :
+   - Regarde le pied de page du document :
+     * Repère le "Montant HT" global imprimé (ex: "Montant HT : 1187,38").
+     * Toutes les lignes d'articles doivent être extraites, SANS AUCUN OUBLI.
+     * La somme des "total_ht" de toutes tes lignes extraites DOIT être égale (à quelques centimes près d'arrondi) au Montant HT total imprimé en bas du document.
 
-5. **NETTOYAGE DU NOM PRODUIT** :
-   - Extrait le libellé commercial clair en enlevant les codes barres ou références fournisseurs inutiles (ex: "004321 POMMES GOLDEN CAT 1 CAL 115-130" -> "Pommes Golden Cat 1").
-   - Garde le conditionnement pertinent (ex: "Vrac", "Plateau 6kg", "Surgelé") si cela aide le cuisinier.
+5. **DATE DU DOCUMENT** :
+   - Extrait la date figurant sur le document (ex: "23.10.2026" ou "23/10/2026").
+   - Utilise cette date comme valeur du champ "jour" (ex: "23/10/2026").
 
-6. **EXHAUSTIVITÉ** :
-   - Extrait **TOUTES les lignes d'articles**, sans en oublier aucune. Ne résume pas et n'arrête pas la liste au milieu.
-
-### FORMAT DE SORTIE :
-Tu dois répondre STRICTEMENT par un objet JSON valide (aucun texte d'introduction ni de conclusion) :
+### FORMAT DE SORTIE JSON STRICT :
+Réponds UNIQUEMENT avec un objet JSON valide conforme au schéma suivant :
 {
   "data": [
     {
-      "jour": "Lundi 03 Novembre 2026",
+      "jour": "23/10/2026",
       "ligne_facture": [
         {
-          "produit": "[BIO] Pommes Gala Vrac",
-          "quantite": 14.5,
-          "prix_unitaire": 2.15,
-          "total_ht": 31.18,
-          "tva": 1.71,
-          "ttc": 32.89,
-          "est_bio": true,
-          "label": "BIO"
+          "produit": "Ketchup bid 5KGx4 Toquelia",
+          "quantite": 2,
+          "prix_unitaire": 6.456,
+          "total_ht": 12.91,
+          "tva": 0.71,
+          "ttc": 13.62,
+          "est_bio": false,
+          "label": "STANDARD"
+        },
+        {
+          "produit": "Macaroni QS sac 5KG Panzani",
+          "quantite": 14,
+          "prix_unitaire": 20.687,
+          "total_ht": 289.62,
+          "tva": 15.93,
+          "ttc": 305.55,
+          "est_bio": false,
+          "label": "STANDARD"
         }
       ]
     }
@@ -93,7 +100,7 @@ export async function POST(req: Request) {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-4o', // Passé de gpt-4o-mini à gpt-4o pour une précision maximale d'OCR
+        model: 'gpt-4o',
         messages: [
           {
             role: 'system',
@@ -118,7 +125,7 @@ export async function POST(req: Request) {
         ],
         response_format: { type: "json_object" },
         max_tokens: 4096,
-        temperature: 0.05,
+        temperature: 0.0, // 0 strict pour éliminer toute hallucination ou approximation
       }),
     });
 
