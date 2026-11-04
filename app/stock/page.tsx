@@ -1,13 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Package, Search, Minus, Plus, Trash2, ArrowDownCircle, Printer } from 'lucide-react';
+import { Package, Search, Minus, Plus, Trash2, Printer } from 'lucide-react';
 import { StockItem } from '../lib/types';
-import { updateStockQuantity, saveStock } from '../lib/stock-utils';
-// We would ideally import useStock here but since this is client component in Next app folder structure,
-// let's just use localStorage directly or duplicate the simple logic for now if hooks are problematic in SSR context
-// but 'use client' handles it. Let's try to make a robust reusable hook later.
-// For now, I'll inline the logic to ensure it works without complex context providers first.
+import { updateStockQuantity, saveStock, safeNumber } from '../lib/stock-utils';
 
 export default function StockPage() {
     const [stock, setStock] = useState<StockItem[]>([]);
@@ -29,8 +25,7 @@ export default function StockPage() {
                 console.error("Error loading stock", e);
             }
         }
-        // Si le stock local est vide (ex: premier chargement sur téléphone),
-        // on tente une récupération automatique depuis Google Sheets
+        // Si le stock local est vide, tentative automatique depuis Google Sheets
         import('../lib/sync-engine').then(({ syncData }) => {
             syncData('stock').then(res => {
                 if (res.direction === 'pulled' && res.data) {
@@ -71,6 +66,36 @@ export default function StockPage() {
         }
     }, [stock, loading]);
 
+    const updateUnitPrice = (id: string, price: number) => {
+        const validPrice = Math.max(0, safeNumber(price, 0));
+        setStock(prev => {
+            const next = prev.map(si => {
+                if (si.id === id) {
+                    const total = Math.round((si.quantite * validPrice) * 100) / 100;
+                    return { ...si, prix_unitaire: validPrice, total_ht: total };
+                }
+                return si;
+            });
+            saveStock(next);
+            return next;
+        });
+    };
+
+    const updateDirectQuantity = (id: string, qty: number) => {
+        const validQty = Math.max(0, safeNumber(qty, 0));
+        setStock(prev => {
+            const next = prev.map(si => {
+                if (si.id === id) {
+                    const total = Math.round((validQty * (si.prix_unitaire || 0)) * 100) / 100;
+                    return { ...si, quantite: validQty, total_ht: total };
+                }
+                return si;
+            });
+            saveStock(next);
+            return next;
+        });
+    };
+
     const updateQuantity = (id: string, delta: number) => {
         const newStock = updateStockQuantity(id, delta);
         setStock(newStock);
@@ -78,17 +103,21 @@ export default function StockPage() {
 
     const removeItem = (id: string) => {
         if (confirm('Supprimer cet article du stock définitivement ?')) {
-            setStock(prev => prev.filter(item => item.id !== id));
+            setStock(prev => {
+                const next = prev.filter(item => item.id !== id);
+                saveStock(next);
+                return next;
+            });
         }
     };
 
     const filteredStock = stock.filter(item =>
-        item.produit.toLowerCase().includes(searchTerm.toLowerCase())
+        (item.produit || '').toLowerCase().includes(searchTerm.toLowerCase())
     );
 
-    const totalValue = stock.reduce((acc, item) => acc + (item.prix_unitaire * item.quantite), 0);
+    const totalValue = stock.reduce((acc, item) => acc + (safeNumber(item.prix_unitaire, 0) * safeNumber(item.quantite, 0)), 0);
 
-    if (loading) return <div className="p-8 text-center">Chargement du stock...</div>;
+    if (loading) return <div className="p-8 text-center text-gray-500">Chargement du stock...</div>;
 
     return (
         <div className="max-w-6xl mx-auto p-4 md:p-8">
@@ -113,7 +142,7 @@ export default function StockPage() {
                     </button>
                     <div className="bg-white px-4 py-2 rounded-lg shadow-sm border border-gray-200">
                         <span className="text-sm text-gray-500">Valeur totale du stock</span>
-                        <div className="text-2xl font-bold text-gray-900">{totalValue.toFixed(2)} €</div>
+                        <div className="text-2xl font-bold text-gray-900">{(isNaN(totalValue) ? 0 : totalValue).toFixed(2)} €</div>
                     </div>
                 </div>
             </div>
@@ -154,15 +183,15 @@ export default function StockPage() {
                                         <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
                                             Aucun produit dans le stock pour le moment.
                                             <br />
-                                            <span className="text-sm text-gray-400">Ajoutez des factures pour remplir votre stock.</span>
+                                            <span className="text-sm text-gray-400">Ajoutez des factures ou bons de livraison pour remplir votre stock.</span>
                                         </td>
                                     </tr>
                                 ) : (
                                     filteredStock.map((item) => (
                                         <tr key={item.id} className="hover:bg-blue-50/30 transition-colors group">
                                             <td className="px-6 py-4 font-medium text-gray-900">
-                                                {item.produit.replace('[BIO] ', '')}
-                                                {item.quantite < 1 && <span className="ml-2 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs">Épuisé</span>}
+                                                {(item.produit || '').replace(/^\[BIO\]\s*/i, '')}
+                                                {item.quantite < 1 && <span className="ml-2 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Épuisé</span>}
                                             </td>
                                             <td className="px-6 py-4 text-center">
                                                 {item.est_bio ? (
@@ -171,7 +200,7 @@ export default function StockPage() {
                                                     </span>
                                                 ) : (
                                                     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                                                        Standard
+                                                        {item.label || 'Standard'}
                                                     </span>
                                                 )}
                                             </td>
@@ -179,12 +208,9 @@ export default function StockPage() {
                                                 <input
                                                     type="number"
                                                     step="0.0001"
-                                                    value={item.prix_unitaire}
-                                                    onChange={(e) => {
-                                                        const price = parseFloat(e.target.value) || 0;
-                                                        setStock(prev => prev.map(si => si.id === item.id ? { ...si, prix_unitaire: price } : si));
-                                                    }}
-                                                    className="w-20 text-right bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
+                                                    value={item.prix_unitaire ?? 0}
+                                                    onChange={(e) => updateUnitPrice(item.id, parseFloat(e.target.value))}
+                                                    className="w-24 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none font-semibold text-gray-800"
                                                 /> €
                                             </td>
                                             <td className="px-6 py-4">
@@ -200,12 +226,9 @@ export default function StockPage() {
                                                     <input
                                                         type="number"
                                                         step="0.01"
-                                                        value={item.quantite}
-                                                        onChange={(e) => {
-                                                            const qty = parseFloat(e.target.value) || 0;
-                                                            setStock(prev => prev.map(si => si.id === item.id ? { ...si, quantite: qty } : si));
-                                                        }}
-                                                        className="w-16 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none"
+                                                        value={item.quantite ?? 0}
+                                                        onChange={(e) => updateDirectQuantity(item.id, parseFloat(e.target.value))}
+                                                        className="w-20 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none"
                                                     />
 
                                                     <button
@@ -217,8 +240,8 @@ export default function StockPage() {
                                                     </button>
                                                 </div>
                                             </td>
-                                            <td className="px-6 py-4 text-right font-medium text-gray-900">
-                                                {(item.quantite * item.prix_unitaire).toFixed(2)} €
+                                            <td className="px-6 py-4 text-right font-bold text-gray-900">
+                                                {(safeNumber(item.quantite, 0) * safeNumber(item.prix_unitaire, 0)).toFixed(2)} €
                                             </td>
                                             <td className="px-6 py-4 text-center">
                                                 <button
@@ -243,7 +266,7 @@ export default function StockPage() {
                         <div className="px-6 py-12 text-center text-gray-500">
                             Aucun produit dans le stock pour le moment.
                             <br />
-                            <span className="text-sm text-gray-400">Ajoutez des factures pour remplir votre stock.</span>
+                            <span className="text-sm text-gray-400">Ajoutez des factures ou bons de livraison pour remplir votre stock.</span>
                         </div>
                     ) : (
                         filteredStock.map((item) => (
@@ -252,7 +275,7 @@ export default function StockPage() {
                                 <div className="flex items-start justify-between gap-2">
                                     <div className="flex-1 min-w-0">
                                         <div className="font-semibold text-gray-900 text-base break-words">
-                                            {item.produit.replace('[BIO] ', '')}
+                                            {(item.produit || '').replace(/^\[BIO\]\s*/i, '')}
                                         </div>
                                         {item.quantite < 1 && (
                                             <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">
@@ -267,7 +290,7 @@ export default function StockPage() {
                                             </span>
                                         ) : (
                                             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                                                Standard
+                                                {item.label || 'Standard'}
                                             </span>
                                         )}
                                         <button
@@ -287,19 +310,16 @@ export default function StockPage() {
                                         <input
                                             type="number"
                                             step="0.0001"
-                                            value={item.prix_unitaire}
-                                            onChange={(e) => {
-                                                const price = parseFloat(e.target.value) || 0;
-                                                setStock(prev => prev.map(si => si.id === item.id ? { ...si, prix_unitaire: price } : si));
-                                            }}
-                                            className="w-20 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none font-medium text-gray-800"
+                                            value={item.prix_unitaire ?? 0}
+                                            onChange={(e) => updateUnitPrice(item.id, parseFloat(e.target.value))}
+                                            className="w-24 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none font-semibold text-gray-800"
                                         />
                                         <span>€</span>
                                     </div>
                                     <div className="text-right">
                                         <span className="text-xs text-gray-400 font-medium">Valeur : </span>
                                         <span className="font-bold text-gray-900 text-base">
-                                            {(item.quantite * item.prix_unitaire).toFixed(2)} €
+                                            {(safeNumber(item.quantite, 0) * safeNumber(item.prix_unitaire, 0)).toFixed(2)} €
                                         </span>
                                     </div>
                                 </div>
@@ -319,12 +339,9 @@ export default function StockPage() {
                                         <input
                                             type="number"
                                             step="0.01"
-                                            value={item.quantite}
-                                            onChange={(e) => {
-                                                const qty = parseFloat(e.target.value) || 0;
-                                                setStock(prev => prev.map(si => si.id === item.id ? { ...si, quantite: qty } : si));
-                                            }}
-                                            className="w-16 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none text-gray-900"
+                                            value={item.quantite ?? 0}
+                                            onChange={(e) => updateDirectQuantity(item.id, parseFloat(e.target.value))}
+                                            className="w-20 text-center font-bold text-base bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none text-gray-900"
                                         />
 
                                         <button

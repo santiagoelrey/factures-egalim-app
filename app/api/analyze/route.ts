@@ -3,67 +3,63 @@ export const maxDuration = 60;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const PROMPT = `
-Tu es un expert comptable et gestionnaire de cuisine centrale spécialisé dans l'extraction de factures et bons de livraison (BL) de fournisseurs de restauration collective française (ex: EpiSaveurs - Groupe Pomona, Transgourmet, Sysco, Brake, Metro, etc.).
+Tu es un expert comptable et gestionnaire de cuisine centrale spécialisé dans l'extraction de pièces justificatives de restauration collective française :
+- Factures fournisseurs (EpiSaveurs / Pomona, Transgourmet, Sysco, Brake, Metro, etc.)
+- Bons de livraison (BL) chiffrés (avec prix)
+- Bons de livraison (BL) NON chiffrés (uniquement quantités livrées, sans prix)
+- Bordereaux de maraîchers, bouchers, boulangers locaux.
 
-Analyse l'image du document fourni (bordereau de livraison ou facture).
+Analyse minutieusement l'image fournie et extrais fidèlement chaque article livré.
 
-### RÈGLES D'EXTRACTION IMPÉRATIVES :
+### RÈGLES CRITIQUES D'EXTRACTION :
 
-1. **FIDÉLITÉ ABSOLUE AUX LIBELLÉS IMPRIMÉS** :
-   - Recopie EXACTEMENT le libellé commercial imprimé dans la colonne "Désignation" / "Article" (ex: "Macaroni QS sac 5KG Panzani", "Riz lg basmati sac 5KG VPaille", "Curry rge EDC sac 500Gx10 Terre Exo").
-   - N'invente JAMAIS un nom de produit différent (ne remplace PAS "Macaroni" par "Moutarde", ni "Couscous" par "Compote", ni "Terre Exo" par "Toqueuila").
-   - Conserve les marques réelles (Panzani, Lustucru, Terre Exotique, Toquella, etc.) et le conditionnement ("sac 5KG", "bid 5Lx3", etc.).
+1. **FIDÉLITÉ ABSOLUE AUX LIBELLÉS DE PRODUITS** :
+   - Recopie EXACTEMENT le libellé commercial de l'article (ex: "Macaroni QS sac 5KG Panzani", "Riz lg basmati sac 5KG", "Filet poulet PAC", "Pommes Gala Cat 1").
+   - Ne remplace JAMAIS un produit par un autre. Conserve le conditionnement et les marques s'ils sont imprimés.
 
-2. **DÉTECTION DES LABELS DE QUALITÉ (EGALIM)** :
-   - Analyse méticuleusement chaque mot du libellé pour repérer les labels officiels :
-     * "BIO" / "Bio" / "AB" : mets "est_bio": true et "label": "BIO". Ajoute le préfixe "[BIO] " au tout début du nom (ex: "[BIO] Couscous moyen Bio sac 5KG Panz").
-     * "HVE" (Haute Valeur Environnementale) : "est_bio": false, "label": "HVE". (ex: "Torsade QS HVE sac 5KG Lustucru" -> label: "HVE").
+2. **DÉTECTION DES LABELS OFFICIELS (EGALIM)** :
+   - Analyse méticuleusement chaque libellé pour repérer les labels :
+     * "BIO" / "Bio" / "AB" : "est_bio": true, "label": "BIO". Ajoute le préfixe "[BIO] " au tout début du nom s'il n'y figure pas déjà.
+     * "HVE" (Haute Valeur Environnementale) : "est_bio": false, "label": "HVE".
      * "IGP" : "est_bio": false, "label": "IGP".
-     * Si un produit est à la fois BIO et IGP (ex: "Riz lg etuve Camarg IGP Bio sac5KG Heriz") : donne la priorité à "BIO" ("est_bio": true, "label": "BIO", nom: "[BIO] Riz lg etuve Camarg IGP Bio sac5KG Heriz").
+     * Si à la fois BIO et IGP : priorité BIO ("est_bio": true, "label": "BIO", nom: "[BIO] ...").
      * "AOP", "AOC", "LABEL_ROUGE", "STG", "FERMIER", "PECHE_DURABLE".
      * Sinon : "est_bio": false, "label": "STANDARD".
-   - Note : "QS" signifie "Qualité Supérieure" chez les grossistes de pâtes, ce n'est pas un label officiel EGALIM, sauf s'il est accompagné de HVE ou Label Rouge.
+   - "QS" = Qualité Supérieure (standard, sauf mention explicite Label Rouge/HVE).
 
-3. **COLONNES NUMÉRIQUES ET FORMAT GROSSISTE** :
-   Les bordereaux EpiSaveurs / Pomona comportent souvent :
-   \`Ligne/Article | Désignation | Qté livrée | Qté fact. UF | PU | TVA | MT HT\`
-   - **QUANTITÉ** : Extrait le nombre de la colonne "Qté livrée" ou "Qté fact. UF" (ex: "14,000 COL" ou "14,000 SAC" -> 14 ; "2,000 BID" -> 2 ; "3,000 COL" -> 3).
-     * En France la virgule est le séparateur décimal ("14,000" = 14 unités, "2,000" = 2 unités). Ne confonds PAS "14,000" avec quatorze mille !
-   - **PRIX UNITAIRE (PU)** : Recopie fidèlement le chiffre imprimé dans la colonne "PU" (ex: "20,687" -> 20.687 ; "8,632" -> 8.632 ; "13,572" -> 13.572 ; "20,282" -> 20.282).
-   - **MONTANT TOTAL HT (MT HT) - RÈGLE FONDAMENTALE** :
-     * Recopie STRICTEMENT le montant imprimé dans la colonne "MT HT" (ex: 289.62, 120.85, 40.72, 283.95, 245.66).
-     * N'INVENTE PAS de faux totaux et ne divise pas les prix.
-     * Si PU = 20.687 et Qté = 14, MT HT = 289.62 € (14 x 20.687).
-   - **TVA** : Si un code TVA comme "E 1" ou "5,50 %" est présent, calcule ou extrait la TVA correspondante. Si 5.5% : TVA = MT HT x 0.055.
-   - **TTC** : MT HT + TVA.
+3. **QUANTITÉ RÉELLEMENT LIVRÉE (TRÈS IMPORTANT)** :
+   - Les documents comportent souvent plusieurs colonnes de quantités :
+     * "Qté Commandée" (Cde) vs "Qté Livrée" (Liv / Livr) vs "Qté Facturée" (Fact / Fact. UF).
+     * Prends TOUJOURS la **QUANTITÉ RÉELLEMENT LIVRÉE** (ce qui entre physiquement en cuisine).
+     * Si un article a Qté Livrée = 0 (rupture de stock / manquant), IGNORE cette ligne ou mets quantité: 0.
+   - **UNITÉ & CONDITIONNEMENT (KG vs COLIS / PIÈCES)** :
+     * Si l'article est facturé au POIDS (viande, poisson, fruits et légumes frais en vrac au kg) : prends le POIDS NET LIVRÉ EN KG (ex: si 2 colis pour un total de 10,500 kg facturés au kg -> quantité = 10.5).
+     * Si l'article est vendu à l'unité, au carton, à la boîte ou au bidon (ex: conserves, bidons d'huile, condiments) : prends le NOMBRE D'UNITÉS LIVRÉES (ex: 2 bidons -> 2 ; 14 sacs -> 14).
+   - En France, la virgule sépare les décimales : "14,000" = 14 ; "2,500" = 2.5 ; "0,750" = 0.75. Ne confonds JAMAIS "14,000" avec quatorze mille !
+   - Le champ "quantite" doit être un nombre flottant JSON pur (ex: 14 ou 2.5), JAMAIS une chaîne de caractères.
 
-4. **CONTRÔLE DE TOTALISATION DU DOCUMENT (VÉRIFICATION D'EXHAUSTIVITÉ)** :
-   - Regarde le pied de page du document :
-     * Repère le "Montant HT" global imprimé (ex: "Montant HT : 1187,38").
-     * Toutes les lignes d'articles doivent être extraites, SANS AUCUN OUBLI.
-     * La somme des "total_ht" de toutes tes lignes extraites DOIT être égale (à quelques centimes près d'arrondi) au Montant HT total imprimé en bas du document.
+4. **PRIX UNITAIRE ET TOTAL HT** :
+   - **CAS 1 : Bon de livraison SANS PRIX (BL non chiffré)** :
+     * C'est très fréquent en restauration collective. N'INVENTE PAS DE FAUX PRIX !
+     * Mets simplement: "prix_unitaire": 0, "total_ht": 0, "tva": 0, "ttc": 0.
+   - **CAS 2 : Facture ou BL CHIFFRÉ (avec prix)** :
+     * "prix_unitaire" : recopie le prix unitaire imprimé (ex: 20.687, 8.632, 1.485).
+     * "total_ht" : recopie le montant total HT de la ligne (ex: 289.62, 120.85).
+     * Cohérence : total_ht ≈ quantite * prix_unitaire. Si l'un des deux est manquant, déduis-le mathématiquement.
+     * TVA : montant de TVA de la ligne (taux alimentaire habituel 5.5% si non spécifié).
+     * TTC : total_ht + tva.
 
 5. **DATE DU DOCUMENT** :
-   - Extrait la date figurant sur le document (ex: "23.10.2026" ou "23/10/2026").
-   - Utilise cette date comme valeur du champ "jour" (ex: "23/10/2026").
+   - Recherche la date imprimée (date de livraison ou date de facture, ex: "23/10/2026").
+   - Utilise cette date pour le champ "jour" (ex: "23/10/2026"). Si introuvable, utilise la date du jour.
 
 ### FORMAT DE SORTIE JSON STRICT :
-Réponds UNIQUEMENT avec un objet JSON valide conforme au schéma suivant :
+Réponds UNIQUEMENT avec un objet JSON valide conforme à la structure suivante :
 {
   "data": [
     {
       "jour": "23/10/2026",
       "ligne_facture": [
-        {
-          "produit": "Ketchup bid 5KGx4 Toquelia",
-          "quantite": 2,
-          "prix_unitaire": 6.456,
-          "total_ht": 12.91,
-          "tva": 0.71,
-          "ttc": 13.62,
-          "est_bio": false,
-          "label": "STANDARD"
-        },
         {
           "produit": "Macaroni QS sac 5KG Panzani",
           "quantite": 14,
@@ -79,6 +75,14 @@ Réponds UNIQUEMENT avec un objet JSON valide conforme au schéma suivant :
   ]
 }
 `;
+
+function cleanNumber(val: any, fallback = 0): number {
+  if (typeof val === 'number') return isNaN(val) ? fallback : val;
+  if (!val) return fallback;
+  const str = String(val).replace(/\s/g, '').replace(',', '.');
+  const num = parseFloat(str);
+  return isNaN(num) ? fallback : num;
+}
 
 export async function POST(req: Request) {
   try {
@@ -104,7 +108,7 @@ export async function POST(req: Request) {
         messages: [
           {
             role: 'system',
-            content: 'Tu es un système de reconnaissance optique et comptable ultra-précis pour les pièces justificatives de cuisine collective.'
+            content: 'Tu es un système de reconnaissance optique et comptable expert pour les bons de livraison et factures de restauration collective française.'
           },
           {
             role: 'user',
@@ -125,7 +129,7 @@ export async function POST(req: Request) {
         ],
         response_format: { type: "json_object" },
         max_tokens: 4096,
-        temperature: 0.0, // 0 strict pour éliminer toute hallucination ou approximation
+        temperature: 0.0,
       }),
     });
 
@@ -141,10 +145,89 @@ export async function POST(req: Request) {
     const result = await response.json();
     const rawText = result?.choices?.[0]?.message?.content || '{}';
 
-    const parsed = JSON.parse(rawText);
-    const data = parsed.data || parsed;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // In case output contains markdown json fences
+      const match = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (match) {
+        parsed = JSON.parse(match[1]);
+      } else {
+        throw new Error("Impossible de lire le JSON renvoyé par l'IA");
+      }
+    }
 
-    return Response.json({ data, model_used: 'gpt-4o' });
+    // Normalize raw parsed into array of days
+    let daysArray: any[] = [];
+    if (Array.isArray(parsed)) {
+      daysArray = parsed;
+    } else if (Array.isArray(parsed.data)) {
+      daysArray = parsed.data;
+    } else if (parsed.ligne_facture || parsed.lines) {
+      daysArray = [parsed];
+    } else {
+      // If object with keys
+      daysArray = [parsed];
+    }
+
+    // Robust sanitization of extracted data
+    const sanitizedData = daysArray.map((dayObj: any) => {
+      const jourStr = dayObj.jour || dayObj.date || new Date().toLocaleDateString('fr-FR');
+      const linesRaw = dayObj.ligne_facture || dayObj.lines || dayObj.articles || [];
+
+      const cleanLines = (Array.isArray(linesRaw) ? linesRaw : [])
+        .map((line: any) => {
+          let produit = (line.produit || line.designation || line.nom || '').trim();
+          if (!produit) return null;
+
+          const quantite = cleanNumber(line.quantite ?? line.qte ?? line.quantite_livree, 0);
+          // If quantity is explicitly 0 and no other info, skip
+          if (quantite <= 0) return null;
+
+          let prix_unitaire = cleanNumber(line.prix_unitaire ?? line.pu ?? line.prix_unit, 0);
+          let total_ht = cleanNumber(line.total_ht ?? line.montant_ht ?? line.total, 0);
+
+          // Arithmetic reconciliation
+          if (total_ht === 0 && quantite > 0 && prix_unitaire > 0) {
+            total_ht = Math.round(quantite * prix_unitaire * 100) / 100;
+          } else if (prix_unitaire === 0 && quantite > 0 && total_ht > 0) {
+            prix_unitaire = Math.round((total_ht / quantite) * 10000) / 10000;
+          }
+
+          let est_bio = Boolean(line.est_bio);
+          let label = line.label || (estBioCheck(produit) ? 'BIO' : 'STANDARD');
+          if (label === 'BIO' || produit.toUpperCase().includes('BIO') || produit.toUpperCase().includes('AGRICULTURE BIOLOGIQUE')) {
+            est_bio = true;
+            label = 'BIO';
+            if (!produit.startsWith('[BIO] ')) {
+              produit = `[BIO] ${produit}`;
+            }
+          }
+
+          const tva = cleanNumber(line.tva, Math.round(total_ht * 0.055 * 100) / 100);
+          const ttc = cleanNumber(line.ttc, Math.round((total_ht + tva) * 100) / 100);
+
+          return {
+            produit,
+            quantite: Math.round(quantite * 1000) / 1000,
+            prix_unitaire,
+            total_ht: Math.round(total_ht * 100) / 100,
+            tva,
+            ttc,
+            est_bio,
+            label,
+          };
+        })
+        .filter(Boolean);
+
+      return {
+        jour: jourStr,
+        ligne_facture: cleanLines,
+      };
+    }).filter(d => d.ligne_facture.length > 0);
+
+    return Response.json({ data: sanitizedData, model_used: 'gpt-4o' });
 
   } catch (error: any) {
     console.error('Analysis error:', error);
@@ -153,4 +236,9 @@ export async function POST(req: Request) {
       details: error?.message,
     }, { status: 500 });
   }
+}
+
+function estBioCheck(name: string): boolean {
+  const upper = (name || '').toUpperCase();
+  return upper.includes('BIO') || upper.includes('BIOLOGIQUE') || upper.startsWith('AB ') || upper.endsWith(' AB');
 }

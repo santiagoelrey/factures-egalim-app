@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Upload, FileUp, Check, Loader2, Save, Package, Download, Plus, Trash2 } from 'lucide-react';
+import { Upload, FileUp, Check, Loader2, Save, Package, Download, Plus, Trash2, CheckCircle2 } from 'lucide-react';
 import { DayData, InvoiceLine } from './lib/types';
-import { addLinesToStock } from './lib/stock-utils';
+import { addLinesToStock, safeNumber } from './lib/stock-utils';
 import { exportToCSV } from './lib/csv-utils';
 import { markLocalModified } from './lib/sync-engine';
 
@@ -51,14 +51,28 @@ export default function Home() {
   const addToStock = () => {
     if (!data) return;
 
-    const allLines = data.flatMap(day => day.ligne_facture);
-    const addedCount = addLinesToStock(allLines);
+    const allLines = data.flatMap(day => day.ligne_facture || []);
+    const validLines = allLines
+      .filter(line => (line.produit || '').trim() !== '')
+      .map(line => ({
+        ...line,
+        quantite: safeNumber(line.quantite, 0),
+        prix_unitaire: safeNumber(line.prix_unitaire, 0),
+        total_ht: safeNumber(line.total_ht, Math.round(safeNumber(line.quantite, 0) * safeNumber(line.prix_unitaire, 0) * 100) / 100),
+      }));
+
+    if (validLines.length === 0) {
+      alert("Aucune ligne valide à ajouter au stock.");
+      return;
+    }
+
+    const addedCount = addLinesToStock(validLines);
 
     // Save to invoice history for EGALIM percentage calculations
     const historyStr = localStorage.getItem('egalim_invoice_history_v1');
     const history = historyStr ? JSON.parse(historyStr) : [];
     
-    const datedLines = allLines.map(line => ({
+    const datedLines = validLines.map(line => ({
       ...line,
       date_scan: new Date().toISOString(),
       label: line.label || (line.est_bio ? 'BIO' : 'STANDARD')
@@ -67,7 +81,12 @@ export default function Home() {
     localStorage.setItem('egalim_invoice_history_v1', JSON.stringify([...history, ...datedLines]));
     markLocalModified('invoice_history');
 
-    alert(`${addedCount} lignes ajoutées au stock avec succès !`);
+    // Notify other pages
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('egalim_sync_completed'));
+    }
+
+    alert(`Succès : ${addedCount} produit(s) mis à jour ou ajoutés au stock !`);
   };
 
   const handleExportCSV = () => {
@@ -75,7 +94,6 @@ export default function Home() {
     const cleanName = etablissement.trim().replace(/[^a-zA-Z0-9]/g, '_') || 'cuisine';
     exportToCSV(data, `facture_egalim_${cleanName}_${new Date().toISOString().split('T')[0]}.csv`);
   };
-
 
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -141,13 +159,20 @@ export default function Home() {
         body: JSON.stringify({ image: selectedImage }),
       });
 
-      if (!response.ok) throw new Error('Erreur lors de l\'analyse');
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Erreur lors de l\'analyse');
+      }
 
       const result = await response.json();
-      setData(result.data);
-    } catch (error) {
+      if (Array.isArray(result.data)) {
+        setData(result.data);
+      } else {
+        throw new Error("Format de données invalide reçu du serveur");
+      }
+    } catch (error: any) {
       console.error(error);
-      alert('Erreur lors de l\'analyse de l\'image.');
+      alert(`Erreur lors de l'analyse de l'image : ${error?.message || 'Erreur inconnue'}`);
     } finally {
       setAnalyzing(false);
     }
@@ -179,19 +204,28 @@ export default function Home() {
   const updateLine = (dayIndex: number, lineIndex: number, field: keyof InvoiceLine, value: any) => {
     if (!data) return;
     const newData = [...data];
+    const targetLine = newData[dayIndex].ligne_facture[lineIndex];
     // @ts-ignore
-    newData[dayIndex].ligne_facture[lineIndex][field] = value;
+    targetLine[field] = value;
 
-    // Recalculate totals if needed
-    if (field === 'quantite' || field === 'prix_unitaire') {
-      const q = Number(newData[dayIndex].ligne_facture[lineIndex].quantite);
-      const p = Number(newData[dayIndex].ligne_facture[lineIndex].prix_unitaire);
-      newData[dayIndex].ligne_facture[lineIndex].total_ht = Number((q * p).toFixed(4));
-      // Recalcul TVA/TTC (assuming 5.5% default or existing rate)
-      // Simple re-estimation for UI feedback:
-      const tvaRate = 0.055;
-      newData[dayIndex].ligne_facture[lineIndex].tva = Number((newData[dayIndex].ligne_facture[lineIndex].total_ht * tvaRate).toFixed(4));
-      newData[dayIndex].ligne_facture[lineIndex].ttc = Number((newData[dayIndex].ligne_facture[lineIndex].total_ht * (1 + tvaRate)).toFixed(4));
+    const tvaRate = 0.055;
+
+    // Recalculate totals according to what was modified
+    if (field === 'total_ht') {
+      const totalHt = safeNumber(value, 0);
+      const q = safeNumber(targetLine.quantite, 0);
+      targetLine.total_ht = Math.round(totalHt * 100) / 100;
+      if (q > 0) {
+        targetLine.prix_unitaire = Math.round((totalHt / q) * 10000) / 10000;
+      }
+      targetLine.tva = Math.round(targetLine.total_ht * tvaRate * 100) / 100;
+      targetLine.ttc = Math.round((targetLine.total_ht + targetLine.tva) * 100) / 100;
+    } else if (field === 'prix_unitaire' || field === 'quantite') {
+      const q = safeNumber(targetLine.quantite, 0);
+      const p = safeNumber(targetLine.prix_unitaire, 0);
+      targetLine.total_ht = Math.round((q * p) * 100) / 100;
+      targetLine.tva = Math.round(targetLine.total_ht * tvaRate * 100) / 100;
+      targetLine.ttc = Math.round((targetLine.total_ht + targetLine.tva) * 100) / 100;
     }
 
     setData(newData);
@@ -224,12 +258,11 @@ export default function Home() {
     <main className="min-h-screen bg-gray-50 p-4 md:p-8 font-sans">
       <div className="max-w-4xl mx-auto space-y-8">
 
-
         {/* Header */}
         <div className="text-center space-y-2 pt-8">
-          <h1 className="text-3xl font-bold text-gray-900 tracking-tight">Analyse de Facture</h1>
+          <h1 className="text-3xl font-bold text-gray-900 tracking-tight">Analyse de Facture & Bon de Livraison</h1>
           <p className="text-gray-500 font-medium text-blue-600">
-            {etablissement ? `Cuisine : ${etablissement}` : 'Scanner vos factures pour analyse et mise en stock'}
+            {etablissement ? `Cuisine : ${etablissement}` : 'Scanner vos BL ou factures pour analyse et mise en stock'}
           </p>
         </div>
 
@@ -243,7 +276,7 @@ export default function Home() {
                 ) : (
                   <>
                     <Upload className="w-10 h-10 text-gray-400 mb-2 group-hover:text-blue-500" />
-                    <span className="text-sm text-gray-600">Cliquez pour prendre une photo ou uploader</span>
+                    <span className="text-sm text-gray-600">Cliquez pour prendre une photo ou uploader le BL / facture</span>
                   </>
                 )}
               </div>
@@ -264,7 +297,7 @@ export default function Home() {
                 className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-full font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {analyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileUp className="w-4 h-4" />}
-                {analyzing ? 'Analyse en cours...' : 'Analyser la facture'}
+                {analyzing ? 'Analyse du document en cours...' : 'Analyser le document'}
               </button>
             )}
 
@@ -301,55 +334,179 @@ export default function Home() {
         {/* Results Section */}
         {data && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {data.map((day, dIdx) => (
-              <div key={dIdx} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
-                  <h3 className="font-semibold text-gray-800">{day.jour}</h3>
-                </div>
-                {/* Desktop View (Table) */}
-                <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-gray-600">
-                      <tr>
-                        <th className="px-4 py-3 text-left font-semibold">Produit</th>
-                        <th className="px-4 py-3 text-right font-semibold">Qté</th>
-                        <th className="px-4 py-3 text-right w-28 font-semibold">Prix U. HT</th>
-                        <th className="px-4 py-3 text-right font-semibold">Total HT</th>
-                        <th className="px-4 py-3 text-left font-semibold w-40">Label Qualité</th>
-                        <th className="px-4 py-3 text-center font-semibold w-20">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {day.ligne_facture.map((line, lIdx) => (
-                        <tr key={lIdx} className="hover:bg-blue-50/30 transition-colors">
-                          <td className="p-3">
+            {data.map((day, dIdx) => {
+              const lines = day.ligne_facture || [];
+              const totalItems = lines.length;
+              const totalQty = lines.reduce((acc, l) => acc + safeNumber(l.quantite, 0), 0);
+              const totalHtDoc = lines.reduce((acc, l) => acc + safeNumber(l.total_ht, 0), 0);
+              const totalTtcDoc = lines.reduce((acc, l) => acc + safeNumber(l.ttc, safeNumber(l.total_ht, 0) * 1.055), 0);
+              const bioHtDoc = lines.filter(l => l.est_bio).reduce((acc, l) => acc + safeNumber(l.total_ht, 0), 0);
+              const egalimHtDoc = lines.filter(l => l.est_bio || (l.label && l.label !== 'STANDARD')).reduce((acc, l) => acc + safeNumber(l.total_ht, 0), 0);
+
+              const bioPercent = totalHtDoc > 0 ? ((bioHtDoc / totalHtDoc) * 100).toFixed(1) : '0';
+              const egalimPercent = totalHtDoc > 0 ? ((egalimHtDoc / totalHtDoc) * 100).toFixed(1) : '0';
+
+              return (
+                <div key={dIdx} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                  <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-bold text-gray-800">{day.jour}</h3>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="bg-blue-50 text-blue-700 font-bold px-2.5 py-1 rounded-full border border-blue-100">
+                        {totalItems} article{totalItems > 1 ? 's' : ''} ({totalQty} unité{totalQty > 1 ? 's' : ''}/kg)
+                      </span>
+                      {totalHtDoc > 0 && (
+                        <span className="bg-green-50 text-green-700 font-bold px-2.5 py-1 rounded-full border border-green-100">
+                          Total HT : {totalHtDoc.toFixed(2)} €
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Desktop View (Table) */}
+                  <div className="hidden md:block overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 text-gray-600">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-semibold">Produit</th>
+                          <th className="px-4 py-3 text-right font-semibold w-24">Qté Livrée</th>
+                          <th className="px-4 py-3 text-right w-28 font-semibold">Prix U. HT</th>
+                          <th className="px-4 py-3 text-right w-32 font-semibold">Total HT</th>
+                          <th className="px-4 py-3 text-left font-semibold w-36">Label Qualité</th>
+                          <th className="px-4 py-3 text-center font-semibold w-16">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {lines.map((line, lIdx) => (
+                          <tr key={lIdx} className="hover:bg-blue-50/30 transition-colors">
+                            <td className="p-3">
+                              <input
+                                value={(line.produit || '').replace(/^\[BIO\]\s*/i, '')}
+                                onChange={(e) => updateLine(dIdx, lIdx, 'produit', (line.est_bio ? '[BIO] ' : '') + e.target.value)}
+                                className="w-full bg-transparent border-b border-dashed border-transparent hover:border-gray-300 focus:border-blue-400 focus:outline-none py-1 font-medium text-gray-900"
+                                placeholder="Désignation du produit"
+                              />
+                            </td>
+                            <td className="p-3 text-right">
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={line.quantite ?? 0}
+                                onChange={(e) => updateLine(dIdx, lIdx, 'quantite', parseFloat(e.target.value) || 0)}
+                                className="w-20 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none py-1 font-semibold text-gray-800"
+                              />
+                            </td>
+                            <td className="p-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  step="0.0001"
+                                  value={line.prix_unitaire ?? 0}
+                                  onChange={(e) => updateLine(dIdx, lIdx, 'prix_unitaire', parseFloat(e.target.value) || 0)}
+                                  className="w-24 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none py-1 font-semibold text-gray-800"
+                                />
+                                <span className="text-gray-400 text-xs">€</span>
+                              </div>
+                            </td>
+                            <td className="p-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={line.total_ht ?? 0}
+                                  onChange={(e) => updateLine(dIdx, lIdx, 'total_ht', parseFloat(e.target.value) || 0)}
+                                  className="w-24 text-right bg-transparent border-b border-dashed border-gray-300 focus:border-blue-400 focus:outline-none py-1 font-bold text-gray-900"
+                                />
+                                <span className="text-gray-500 text-xs font-bold">€</span>
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              <select
+                                value={line.label || (line.est_bio ? 'BIO' : 'STANDARD')}
+                                onChange={(e) => {
+                                  const newLabel = e.target.value;
+                                  const isBio = newLabel === 'BIO';
+                                  updateLine(dIdx, lIdx, 'label', newLabel);
+                                  updateLine(dIdx, lIdx, 'est_bio', isBio);
+                                  
+                                  let newName = (line.produit || '').replace(/^\[BIO\]\s*/i, '');
+                                  if (isBio) newName = '[BIO] ' + newName;
+                                  updateLine(dIdx, lIdx, 'produit', newName);
+                                }}
+                                className="w-full bg-white border border-gray-200 rounded-lg text-xs py-1.5 px-2 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                              >
+                                <option value="STANDARD">Standard</option>
+                                <option value="BIO">BIO</option>
+                                <option value="LABEL_ROUGE">Label Rouge</option>
+                                <option value="HVE">HVE</option>
+                                <option value="IGP">IGP</option>
+                                <option value="STG">STG</option>
+                                <option value="AOP">AOP</option>
+                                <option value="AOG">AOG</option>
+                                <option value="FERMIER">Fermier</option>
+                                <option value="PECHE_DURABLE">Pêche Durable</option>
+                              </select>
+                            </td>
+                            <td className="p-3 text-center">
+                              <button
+                                onClick={() => deleteLine(dIdx, lIdx)}
+                                className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                                title="Supprimer la ligne"
+                              >
+                                <Trash2 className="w-4 h-4 text-red-500" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    {/* Summary row */}
+                    <div className="p-4 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center justify-between gap-4 text-sm font-medium">
+                      <button
+                        onClick={() => addLine(dIdx)}
+                        className="text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1 py-1.5 px-3 rounded-lg border border-dashed border-blue-200 hover:border-blue-300 bg-white shadow-sm transition-all"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Ajouter un produit
+                      </button>
+
+                      <div className="flex items-center gap-4 text-xs font-bold">
+                        <span className="text-gray-500">
+                          Total HT : <strong className="text-gray-900 text-sm">{totalHtDoc.toFixed(2)} €</strong>
+                        </span>
+                        <span className="text-gray-500">
+                          TTC estimé : <strong className="text-gray-900 text-sm">{totalTtcDoc.toFixed(2)} €</strong>
+                        </span>
+                        {totalHtDoc > 0 && (
+                          <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
+                            BIO : {bioPercent}% | EGALIM : {egalimPercent}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mobile View (Cards) */}
+                  <div className="block md:hidden divide-y divide-gray-100">
+                    {lines.map((line, lIdx) => (
+                      <div 
+                        key={lIdx} 
+                        className={`p-4 space-y-3 transition-colors relative ${
+                          line.est_bio ? 'bg-green-50/20' : 'bg-white'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          {/* Product Input */}
+                          <div className="flex-1">
+                            <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Produit</label>
                             <input
-                              value={line.produit?.replace('[BIO] ', '')}
+                              value={(line.produit || '').replace(/^\[BIO\]\s*/i, '')}
                               onChange={(e) => updateLine(dIdx, lIdx, 'produit', (line.est_bio ? '[BIO] ' : '') + e.target.value)}
-                              className="w-full bg-transparent border-b border-dashed border-transparent hover:border-gray-300 focus:border-blue-400 focus:outline-none py-1"
+                              className="w-full font-semibold text-gray-800 bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none py-0.5"
                             />
-                          </td>
-                          <td className="p-3 text-right">
-                            <input
-                              type="number"
-                              value={line.quantite}
-                              onChange={(e) => updateLine(dIdx, lIdx, 'quantite', parseFloat(e.target.value) || 0)}
-                              className="w-20 text-right bg-transparent border-b border-dashed border-transparent hover:border-gray-300 focus:border-blue-400 focus:outline-none py-1"
-                            />
-                          </td>
-                          <td className="p-3 text-right">
-                            <input
-                              type="number"
-                              step="0.0001"
-                              value={line.prix_unitaire}
-                              onChange={(e) => updateLine(dIdx, lIdx, 'prix_unitaire', parseFloat(e.target.value) || 0)}
-                              className="w-24 text-right bg-transparent border-b border-dashed border-transparent hover:border-gray-300 focus:border-blue-400 focus:outline-none py-1"
-                            />
-                          </td>
-                          <td className="p-3 text-right font-semibold text-gray-800">
-                            {line.total_ht?.toFixed(2)} €
-                          </td>
-                          <td className="p-3">
+                          </div>
+                          {/* Label Select Dropdown */}
+                          <div className="min-w-[120px]">
                             <select
                               value={line.label || (line.est_bio ? 'BIO' : 'STANDARD')}
                               onChange={(e) => {
@@ -358,11 +515,11 @@ export default function Home() {
                                 updateLine(dIdx, lIdx, 'label', newLabel);
                                 updateLine(dIdx, lIdx, 'est_bio', isBio);
                                 
-                                let newName = line.produit.replace('[BIO] ', '');
+                                let newName = (line.produit || '').replace(/^\[BIO\]\s*/i, '');
                                 if (isBio) newName = '[BIO] ' + newName;
                                 updateLine(dIdx, lIdx, 'produit', newName);
                               }}
-                              className="w-full bg-white border border-gray-200 rounded-lg text-xs py-1.5 px-2 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                              className="w-full bg-white border border-gray-200 rounded-lg text-xs py-1 px-1.5 focus:ring-1 focus:ring-blue-500 focus:outline-none"
                             >
                               <option value="STANDARD">Standard</option>
                               <option value="BIO">BIO</option>
@@ -375,150 +532,88 @@ export default function Home() {
                               <option value="FERMIER">Fermier</option>
                               <option value="PECHE_DURABLE">Pêche Durable</option>
                             </select>
-                          </td>
-                          <td className="p-3 text-center">
-                            <button
-                              onClick={() => deleteLine(dIdx, lIdx)}
-                              className="p-1.5 text-gray-400 hover:text-red-650 hover:bg-red-50 rounded-lg transition-all"
-                              title="Supprimer la ligne"
-                            >
-                              <Trash2 className="w-4 h-4 text-red-500" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="p-3 bg-gray-50/50 border-t border-gray-100 flex justify-start">
-                    <button
-                      onClick={() => addLine(dIdx)}
-                      className="text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1 py-1 px-3 rounded-lg border border-dashed border-blue-200 hover:border-blue-300 bg-white shadow-sm transition-all"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      Ajouter un produit
-                    </button>
-                  </div>
-                </div>
- 
-                {/* Mobile View (Cards) */}
-                <div className="block md:hidden divide-y divide-gray-100">
-                  {day.ligne_facture.map((line, lIdx) => (
-                    <div 
-                      key={lIdx} 
-                      className={`p-4 space-y-3 transition-colors relative ${
-                        line.est_bio ? 'bg-green-50/20' : 'bg-white'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        {/* Product Input */}
-                        <div className="flex-1">
-                          <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Produit</label>
-                          <input
-                            value={line.produit?.replace('[BIO] ', '')}
-                            onChange={(e) => updateLine(dIdx, lIdx, 'produit', (line.est_bio ? '[BIO] ' : '') + e.target.value)}
-                            className="w-full font-semibold text-gray-800 bg-transparent border-b border-dashed border-gray-200 focus:border-blue-400 focus:outline-none py-0.5"
-                          />
+                          </div>
                         </div>
-                        {/* Label Select Dropdown */}
-                        <div className="min-w-[120px]">
-                          <select
-                            value={line.label || (line.est_bio ? 'BIO' : 'STANDARD')}
-                            onChange={(e) => {
-                              const newLabel = e.target.value;
-                              const isBio = newLabel === 'BIO';
-                              updateLine(dIdx, lIdx, 'label', newLabel);
-                              updateLine(dIdx, lIdx, 'est_bio', isBio);
-                              
-                              let newName = line.produit.replace('[BIO] ', '');
-                              if (isBio) newName = '[BIO] ' + newName;
-                              updateLine(dIdx, lIdx, 'produit', newName);
-                            }}
-                            className="w-full bg-white border border-gray-200 rounded-lg text-xs py-1 px-1.5 focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                          >
-                            <option value="STANDARD">Standard</option>
-                            <option value="BIO">BIO</option>
-                            <option value="LABEL_ROUGE">Label Rouge</option>
-                            <option value="HVE">HVE</option>
-                            <option value="IGP">IGP</option>
-                            <option value="STG">STG</option>
-                            <option value="AOP">AOP</option>
-                            <option value="AOG">AOG</option>
-                            <option value="FERMIER">Fermier</option>
-                            <option value="PECHE_DURABLE">Pêche Durable</option>
-                          </select>
-                        </div>
-                      </div>
- 
-                      <div className="grid grid-cols-3 gap-3 pt-1">
-                        {/* Quantity */}
-                        <div>
-                          <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Quantité</label>
-                          <input
-                            type="number"
-                            value={line.quantite}
-                            onChange={(e) => updateLine(dIdx, lIdx, 'quantite', parseFloat(e.target.value) || 0)}
-                            className="w-full text-sm font-medium bg-gray-50 rounded-lg border border-gray-100 focus:border-blue-400 focus:bg-white focus:outline-none px-2 py-1.5"
-                          />
-                        </div>
-                        {/* Unit Price */}
-                        <div>
-                          <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Prix U. HT</label>
-                          <input
-                            type="number"
-                            step="0.0001"
-                            value={line.prix_unitaire}
-                            onChange={(e) => updateLine(dIdx, lIdx, 'prix_unitaire', parseFloat(e.target.value) || 0)}
-                            className="w-full text-sm font-medium bg-gray-50 rounded-lg border border-gray-100 focus:border-blue-400 focus:bg-white focus:outline-none px-2 py-1.5"
-                          />
-                        </div>
-                        {/* Total HT */}
-                        <div className="text-right flex flex-col justify-end">
-                          <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Total HT</span>
-                          <span className="text-base font-bold text-gray-800 py-1.5">
-                            {line.total_ht?.toFixed(2)} €
-                          </span>
-                        </div>
-                      </div>
-                      
-                      <div className="flex justify-end pt-2">
-                        <button
-                          onClick={() => deleteLine(dIdx, lIdx)}
-                          className="flex items-center gap-1 text-[11px] font-bold text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1.5 rounded-lg border border-red-100 transition-all"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Supprimer
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  
-                  <div className="p-4 bg-gray-50/50 flex justify-center">
-                    <button
-                      onClick={() => addLine(dIdx)}
-                      className="w-full text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-dashed border-blue-200 bg-white shadow-sm transition-all"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Ajouter un produit
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
 
+                        <div className="grid grid-cols-3 gap-3 pt-1">
+                          {/* Quantity */}
+                          <div>
+                            <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Qté Livrée</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={line.quantite ?? 0}
+                              onChange={(e) => updateLine(dIdx, lIdx, 'quantite', parseFloat(e.target.value) || 0)}
+                              className="w-full text-sm font-medium bg-gray-50 rounded-lg border border-gray-100 focus:border-blue-400 focus:bg-white focus:outline-none px-2 py-1.5"
+                            />
+                          </div>
+                          {/* Unit Price */}
+                          <div>
+                            <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Prix U. HT</label>
+                            <input
+                              type="number"
+                              step="0.0001"
+                              value={line.prix_unitaire ?? 0}
+                              onChange={(e) => updateLine(dIdx, lIdx, 'prix_unitaire', parseFloat(e.target.value) || 0)}
+                              className="w-full text-sm font-medium bg-gray-50 rounded-lg border border-gray-100 focus:border-blue-400 focus:bg-white focus:outline-none px-2 py-1.5"
+                            />
+                          </div>
+                          {/* Total HT */}
+                          <div>
+                            <label className="text-[10px] uppercase font-bold tracking-wider text-gray-400 block mb-0.5">Total HT</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={line.total_ht ?? 0}
+                              onChange={(e) => updateLine(dIdx, lIdx, 'total_ht', parseFloat(e.target.value) || 0)}
+                              className="w-full text-sm font-bold text-gray-900 bg-gray-50 rounded-lg border border-gray-100 focus:border-blue-400 focus:bg-white focus:outline-none px-2 py-1.5 text-right"
+                            />
+                          </div>
+                        </div>
+                        
+                        <div className="flex justify-end pt-2">
+                          <button
+                            onClick={() => deleteLine(dIdx, lIdx)}
+                            className="flex items-center gap-1 text-[11px] font-bold text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1.5 rounded-lg border border-red-100 transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Supprimer
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    
+                    <div className="p-4 bg-gray-50/50 space-y-3">
+                      <div className="flex justify-between items-center text-xs font-bold text-gray-600">
+                        <span>Total HT Document :</span>
+                        <span className="text-sm text-gray-900">{totalHtDoc.toFixed(2)} €</span>
+                      </div>
+                      <button
+                        onClick={() => addLine(dIdx)}
+                        className="w-full text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-dashed border-blue-200 bg-white shadow-sm transition-all"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Ajouter un produit
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
 
             <div className="flex flex-col md:flex-row items-center justify-center gap-4 pt-4 pb-20">
               <button
                 onClick={addToStock}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-blue-100 transition-all hover:scale-105"
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-blue-100 transition-all hover:scale-105 cursor-pointer"
               >
                 <Package className="w-5 h-5" />
-                Ajouter au Stock
+                Valider vers le Stock
               </button>
 
               <button
                 onClick={syncToSheets}
                 disabled={syncing}
-                className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-green-100 transition-all hover:scale-105 disabled:opacity-50 disabled:scale-100"
+                className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-green-100 transition-all hover:scale-105 disabled:opacity-50 disabled:scale-100 cursor-pointer"
               >
                 {syncing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                 {syncing ? 'Envoi...' : 'Envoyer vers Google Sheets'}
@@ -526,7 +621,7 @@ export default function Home() {
 
               <button
                 onClick={handleExportCSV}
-                className="flex items-center gap-2 bg-slate-700 hover:bg-slate-800 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-slate-100 transition-all hover:scale-105"
+                className="flex items-center gap-2 bg-slate-700 hover:bg-slate-800 text-white px-8 py-3 rounded-full font-bold shadow-lg shadow-slate-100 transition-all hover:scale-105 cursor-pointer"
               >
                 <Download className="w-5 h-5" />
                 Télécharger CSV (Compta)

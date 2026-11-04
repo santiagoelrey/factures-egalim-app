@@ -2,13 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { InvoiceLine, StockItem } from '../lib/types';
-
-// Simple hash function for IDs
-const generateId = (product: string, isBio: boolean) => {
-    return btoa(`${product}-${isBio}`).replace(/[^a-zA-Z0-9]/g, '');
-};
-
-const STORAGE_KEY = 'egalim_stock_v1';
+import { generateStockId, safeNumber, getStock, saveStock } from '../lib/stock-utils';
 
 export function useStock() {
     const [stock, setStock] = useState<StockItem[]>([]);
@@ -17,10 +11,7 @@ export function useStock() {
     // Load from localStorage on mount
     useEffect(() => {
         try {
-            const stored = localStorage.getItem(STORAGE_KEY);
-            if (stored) {
-                setStock(JSON.parse(stored));
-            }
+            setStock(getStock());
         } catch (e) {
             console.error("Failed to load stock", e);
         } finally {
@@ -31,36 +22,45 @@ export function useStock() {
     // Save to localStorage when stock changes
     useEffect(() => {
         if (!loading) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(stock));
+            saveStock(stock);
         }
     }, [stock, loading]);
 
     const addToStock = (line: InvoiceLine) => {
-        const id = generateId(line.produit, line.est_bio);
+        const id = generateStockId(line.produit, line.est_bio);
         const now = new Date().toISOString();
+        const incomingQty = safeNumber(line.quantite, 0);
+        const incomingPu = safeNumber(line.prix_unitaire, 0);
+        const incomingTotal = safeNumber(line.total_ht, Math.round(incomingQty * incomingPu * 100) / 100);
 
         setStock(prev => {
             const existingIndex = prev.findIndex(item => item.id === id);
             if (existingIndex >= 0) {
-                // Update existing item
                 const updated = [...prev];
+                const current = updated[existingIndex];
+                const newQty = Math.max(0, Math.round((current.quantite + incomingQty) * 1000) / 1000);
+                const finalPu = incomingPu > 0 ? incomingPu : current.prix_unitaire;
+                const newTotal = Math.round(newQty * finalPu * 100) / 100;
+
                 updated[existingIndex] = {
-                    ...updated[existingIndex],
-                    quantite: updated[existingIndex].quantite + line.quantite,
+                    ...current,
+                    quantite: newQty,
+                    prix_unitaire: finalPu,
+                    total_ht: newTotal,
+                    tva: Math.round(newTotal * 0.055 * 100) / 100,
+                    ttc: Math.round(newTotal * 1.055 * 100) / 100,
                     dernier_mouvement: now,
-                    // Averaging price? Or keep latest? Let's keep latest for simplicity or weighted average?
-                    // Simple: Update price to latest
-                    prix_unitaire: line.prix_unitaire,
-                    total_ht: updated[existingIndex].total_ht + line.total_ht,
-                    tva: updated[existingIndex].tva + line.tva,
-                    ttc: updated[existingIndex].ttc + line.ttc,
                 };
                 return updated;
             } else {
-                // Add new item
                 const newItem: StockItem = {
                     ...line,
                     id,
+                    quantite: incomingQty,
+                    prix_unitaire: incomingPu,
+                    total_ht: incomingTotal,
+                    tva: safeNumber(line.tva, Math.round(incomingTotal * 0.055 * 100) / 100),
+                    ttc: safeNumber(line.ttc, Math.round(incomingTotal * 1.055 * 100) / 100),
                     date_ajout: now,
                     dernier_mouvement: now
                 };
@@ -70,25 +70,37 @@ export function useStock() {
     };
 
     const updateQuantity = (id: string, newQuantity: number) => {
+        const qty = safeNumber(newQuantity, 0);
         setStock(prev => {
             return prev.map(item => {
                 if (item.id === id) {
-                    return { ...item, quantite: newQuantity, dernier_mouvement: new Date().toISOString() };
+                    const newQty = Math.max(0, qty);
+                    const total = Math.round(newQty * (item.prix_unitaire || 0) * 100) / 100;
+                    return { 
+                        ...item, 
+                        quantite: newQty, 
+                        total_ht: total,
+                        dernier_mouvement: new Date().toISOString() 
+                    };
                 }
                 return item;
-            }).filter(item => item.quantite > 0); // Remove if <= 0? User might want to keep history.
-            // Let's keep 0 qty items so we don't lose product info. Filter only manually?
-            // Actually user said "deduire ce que l'on utilise". So if it reaches 0, maybe hide or keep?
-            // Keeping for now.
+            });
         });
     };
 
     const removeFromStock = (id: string, amount: number) => {
+        const amt = safeNumber(amount, 0);
         setStock(prev => {
             return prev.map(item => {
                 if (item.id === id) {
-                    const newQty = Math.max(0, item.quantite - amount);
-                    return { ...item, quantite: newQty, dernier_mouvement: new Date().toISOString() };
+                    const newQty = Math.max(0, Math.round((item.quantite - amt) * 1000) / 1000);
+                    const total = Math.round(newQty * (item.prix_unitaire || 0) * 100) / 100;
+                    return { 
+                        ...item, 
+                        quantite: newQty, 
+                        total_ht: total,
+                        dernier_mouvement: new Date().toISOString() 
+                    };
                 }
                 return item;
             });
@@ -99,7 +111,14 @@ export function useStock() {
         if (confirm("Êtes-vous sûr de vouloir vider tout le stock ?")) {
             setStock([]);
         }
-    }
+    };
 
-    return { stock, addToStock, removeFromStock, updateQuantity, clearStock, loading };
+    return {
+        stock,
+        loading,
+        addToStock,
+        updateQuantity,
+        removeFromStock,
+        clearStock,
+    };
 }
